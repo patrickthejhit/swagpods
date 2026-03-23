@@ -8,7 +8,7 @@ This app is set up for a first public demo on Render using:
 
 - Python web service runtime
 - `gunicorn` as the production process
-- `ffmpeg` installed during the Render build so audio/video conversion still works
+- Render's native environment for `ffmpeg` support
 - `render.yaml` for repeatable service configuration
 
 ### Render start command
@@ -43,7 +43,7 @@ Create a new `Web Service` with:
 - Build Command:
 
 ```bash
-apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 - Start Command:
@@ -61,6 +61,7 @@ PYTHON_VERSION=3.11.11
 
 ### Important Render notes
 
+- The Render config assumes Render's native Python environment, which already provides the system tools this demo needs.
 - Render's filesystem is ephemeral, so uploaded originals and exported files are not permanent across deploys or restarts.
 - This setup is intended for a first public demo, not durable storage.
 - If you want uploaded/exported media to persist, add a persistent disk or external object storage later.
