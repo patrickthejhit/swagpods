@@ -603,7 +603,53 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Settings",
-        summary: "Use Customize for shell colors.",
+        summary: "Adjust device options.",
+        items: [
+          {
+            type: "action",
+            id: "customize",
+            title: "Customize",
+            meta: "Shell & Wheel",
+          },
+          {
+            type: "menu",
+            id: "settings-model",
+            title: "iPod Model",
+            meta: getDevicePreset(optimizeForSelect.value).label,
+          },
+          {
+            type: "menu",
+            id: "settings-theme",
+            title: "Theme / Appearance",
+            meta: "Display",
+          },
+          {
+            type: "menu",
+            id: "settings-about",
+            title: "About",
+            meta: "SwagPods",
+          },
+        ],
+      };
+    case "settings-model":
+      return {
+        label: "Settings",
+        title: "iPod Model",
+        summary: `${getDevicePreset(optimizeForSelect.value).label} selected for new conversions.`,
+        items: [],
+      };
+    case "settings-theme":
+      return {
+        label: "Settings",
+        title: "Theme / Appearance",
+        summary: "Open Customize to change shell and wheel styling.",
+        items: [],
+      };
+    case "settings-about":
+      return {
+        label: "Settings",
+        title: "About",
+        summary: "SwagPods iPod-style converter demo.",
         items: [],
       };
     case "main":
@@ -613,6 +659,12 @@ function getLibraryState() {
         title: "Main Menu",
         summary: "Choose a section.",
         items: [
+          {
+            type: "action",
+            id: "convert",
+            title: "Converter",
+            meta: "Universal Media",
+          },
           {
             type: "menu",
             id: "music",
@@ -627,27 +679,9 @@ function getLibraryState() {
           },
           {
             type: "menu",
-            id: "photos",
-            title: "Photos",
-            meta: "Coming Soon",
-          },
-          {
-            type: "action",
-            id: "convert",
-            title: "Convert",
-            meta: "Universal Media",
-          },
-          {
-            type: "action",
-            id: "customize",
-            title: "Customize",
-            meta: "Shell & Wheel",
-          },
-          {
-            type: "menu",
             id: "settings",
             title: "Settings",
-            meta: "Coming Soon",
+            meta: "Device Options",
           },
         ],
       };
@@ -1354,7 +1388,11 @@ menuButton.addEventListener("click", () => {
     }
     return;
   } else {
-    libraryPath = ["main"];
+    if (screenMode === "customize") {
+      libraryPath = ["main", "settings"];
+    } else {
+      libraryPath = ["main"];
+    }
     selectedIndex = 0;
     highlightedSongId = "";
     screenMode = "library";
