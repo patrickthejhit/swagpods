@@ -106,9 +106,12 @@ const BRICK_SIDE_MARGIN = 10;
 const MUSIC_QUIZ_ROUNDS = 5;
 const WHEEL_RING_INNER_RATIO = 0.36;
 const WHEEL_RING_OUTER_RATIO = 0.92;
+const WHEEL_RING_HYSTERESIS = 0.08;
 const WHEEL_DETENT_ANGLE = 0.15;
 const WHEEL_MAX_DELTA = 0.55;
 const WHEEL_DELTA_SMOOTHING = 0.32;
+const WHEEL_MIN_DELTA = 0.012;
+const WHEEL_RADIAL_DRIFT_LIMIT = 0.12;
 const BRICK_LEVEL_LAYOUTS = [
   [
     [1, 1, 1, 1, 1, 1],
@@ -1129,6 +1132,13 @@ function isWheelRingPosition(position) {
   return (
     position.normalizedRadius >= WHEEL_RING_INNER_RATIO &&
     position.normalizedRadius <= WHEEL_RING_OUTER_RATIO
+  );
+}
+
+function isWheelDragPosition(position) {
+  return (
+    position.normalizedRadius >= WHEEL_RING_INNER_RATIO - WHEEL_RING_HYSTERESIS &&
+    position.normalizedRadius <= WHEEL_RING_OUTER_RATIO + WHEEL_RING_HYSTERESIS
   );
 }
 
@@ -2917,6 +2927,7 @@ clickWheel.addEventListener("pointerdown", (event) => {
   wheelDrag = {
     pointerId: event.pointerId,
     lastAngle: position.angle,
+    lastRadius: position.normalizedRadius,
     accumulatedAngle: 0,
     smoothedDelta: 0,
   };
@@ -2933,15 +2944,28 @@ clickWheel.addEventListener("pointermove", (event) => {
   const position = getWheelPolarPosition(event);
   const nextAngle = position.angle;
   let delta = normalizeAngleDelta(nextAngle - wheelDrag.lastAngle);
+  const radialDrift = Math.abs(position.normalizedRadius - wheelDrag.lastRadius);
   wheelDrag.lastAngle = nextAngle;
+  wheelDrag.lastRadius = position.normalizedRadius;
 
-  if (!isWheelRingPosition(position)) {
+  if (!isWheelDragPosition(position)) {
     wheelDrag.smoothedDelta *= 0.6;
+    event.preventDefault();
     return;
   }
 
   if (Math.abs(delta) > WHEEL_MAX_DELTA) {
     delta = Math.sign(delta) * WHEEL_MAX_DELTA;
+  }
+
+  if (radialDrift > WHEEL_RADIAL_DRIFT_LIMIT && Math.abs(delta) < WHEEL_DETENT_ANGLE * 0.7) {
+    event.preventDefault();
+    return;
+  }
+
+  if (Math.abs(delta) < WHEEL_MIN_DELTA) {
+    event.preventDefault();
+    return;
   }
 
   wheelDrag.smoothedDelta =
@@ -2958,6 +2982,8 @@ clickWheel.addEventListener("pointermove", (event) => {
     moveLibrarySelection(-1, "wheel");
     wheelDrag.accumulatedAngle += WHEEL_DETENT_ANGLE;
   }
+
+  event.preventDefault();
 });
 
 ["pointerup", "pointercancel", "lostpointercapture"].forEach((eventName) => {
@@ -2967,6 +2993,12 @@ clickWheel.addEventListener("pointermove", (event) => {
     }
 
     stopWheelDrag();
+  });
+});
+
+[menuButton, rewindButton, forwardButton, selectButton, playbackButton].forEach((button) => {
+  button.addEventListener("pointerdown", () => {
+    haptics.prime();
   });
 });
 
