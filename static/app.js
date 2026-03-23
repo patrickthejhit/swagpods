@@ -857,7 +857,7 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Music",
-        summary: "Browse your media.",
+        summary: "",
         items: [
           {
             type: "menu",
@@ -883,7 +883,7 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Videos",
-        summary: "No video features yet.",
+        summary: "No videos added yet.",
         items: [],
       };
     case "photos":
@@ -901,7 +901,7 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Games",
-        summary: "Choose a game.",
+        summary: "",
         items: GAME_LIBRARY_ITEMS.map((game) => ({
           type: "game",
           id: game.id,
@@ -928,7 +928,7 @@ function getLibraryState() {
       return {
         label: "Music",
         title: "Playlists",
-        summary: "Open converted songs.",
+        summary: "",
         items: [
           {
             type: "menu",
@@ -967,7 +967,7 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Settings",
-        summary: "Adjust device options.",
+        summary: "",
         items: [
           {
             type: "action",
@@ -1021,7 +1021,7 @@ function getLibraryState() {
       return {
         label: "iPod",
         title: "Main Menu",
-        summary: "Choose a section.",
+        summary: "",
         items: [
           {
             type: "action",
@@ -1219,14 +1219,21 @@ function setScreenMode(nextMode) {
     previousScreenMode = nextMode;
   }
   screenMode = nextMode;
-  idleState.classList.toggle("hidden", nextMode !== "idle");
-  editorPanel.classList.toggle("hidden", nextMode !== "edit");
-  libraryPanel.classList.toggle("hidden", nextMode !== "library");
-  syncPanel.classList.toggle("hidden", nextMode !== "sync");
-  photoViewerPanel.classList.toggle("hidden", nextMode !== "photo-viewer");
-  gamePanel.classList.toggle("hidden", nextMode !== "game");
-  customizePanelScreen.classList.toggle("hidden", nextMode !== "customize");
-  nowPlayingPanel.classList.toggle("hidden", nextMode !== "now-playing");
+  ipodScreen.dataset.screen = nextMode;
+  [
+    ["idle", idleState],
+    ["edit", editorPanel],
+    ["library", libraryPanel],
+    ["sync", syncPanel],
+    ["photo-viewer", photoViewerPanel],
+    ["game", gamePanel],
+    ["customize", customizePanelScreen],
+    ["now-playing", nowPlayingPanel],
+  ].forEach(([mode, panel]) => {
+    const isActive = nextMode === mode;
+    panel.classList.toggle("hidden", !isActive);
+    panel.classList.toggle("is-active", isActive);
+  });
 }
 
 function syncSelectButton() {
@@ -2248,10 +2255,11 @@ function renderLibrary() {
   libraryPanel.dataset.libraryView = getLibraryViewKey();
   clampSelectedIndex();
   const { items } = libraryState;
+  const shouldShowSummary = Boolean(libraryState.summary);
 
   if (items.length === 0) {
     librarySummary.textContent = libraryState.summary;
-    librarySummary.classList.remove("hidden");
+    librarySummary.classList.toggle("hidden", !shouldShowSummary);
     librarySelectionBar.classList.add("hidden");
     librarySelectionBar.style.transform = "translateY(0)";
     return;
@@ -2302,6 +2310,9 @@ function renderLibrary() {
     row.appendChild(itemTitle);
     row.appendChild(itemMeta);
     row.addEventListener("mouseenter", () => {
+      if (navigator.maxTouchPoints > 0) {
+        return;
+      }
       if (selectedIndex === itemIndex) {
         return;
       }
@@ -2362,12 +2373,29 @@ function syncUi() {
   syncSelectButton();
   syncPlaybackButton();
   syncWheelButtons();
-  renderConvertScreen();
-  renderLibrary();
-  renderSyncScreen();
-  renderPhotoViewer();
-  renderGameScreen();
-  renderPlayer();
+  if (screenMode === "edit") {
+    renderConvertScreen();
+    return;
+  }
+  if (screenMode === "library") {
+    renderLibrary();
+    return;
+  }
+  if (screenMode === "sync") {
+    renderSyncScreen();
+    return;
+  }
+  if (screenMode === "photo-viewer") {
+    renderPhotoViewer();
+    return;
+  }
+  if (screenMode === "game") {
+    renderGameScreen();
+    return;
+  }
+  if (screenMode === "now-playing") {
+    renderPlayer();
+  }
 }
 
 async function refreshSyncStatus() {
