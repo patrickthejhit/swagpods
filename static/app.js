@@ -61,6 +61,7 @@ const gameScoreLabel = document.getElementById("game-score-label");
 const gameRoundLabel = document.getElementById("game-round-label");
 const gameCanvas = document.getElementById("game-canvas");
 const gameMessageScreen = document.getElementById("game-message-screen");
+const gamePauseOverlay = document.getElementById("game-pause-overlay");
 const gameTitle = document.getElementById("game-title");
 const gameSubtitle = document.getElementById("game-subtitle");
 const gameInstructions = document.getElementById("game-instructions");
@@ -68,6 +69,7 @@ const musicQuizPanel = document.getElementById("music-quiz-panel");
 const musicQuizPromptLabel = document.getElementById("music-quiz-prompt-label");
 const musicQuizPrompt = document.getElementById("music-quiz-prompt");
 const musicQuizChoices = document.getElementById("music-quiz-choices");
+const gameLives = document.getElementById("game-lives");
 const gameFooter = document.getElementById("game-footer");
 const nowPlayingPanel = document.getElementById("now-playing-panel");
 const playerTitle = document.getElementById("player-title");
@@ -102,6 +104,31 @@ const BRICK_PADDING = 6;
 const BRICK_TOP_OFFSET = 22;
 const BRICK_SIDE_MARGIN = 10;
 const MUSIC_QUIZ_ROUNDS = 5;
+const WHEEL_RING_INNER_RATIO = 0.36;
+const WHEEL_RING_OUTER_RATIO = 0.92;
+const WHEEL_DETENT_ANGLE = 0.15;
+const WHEEL_MAX_DELTA = 0.55;
+const WHEEL_DELTA_SMOOTHING = 0.32;
+const BRICK_LEVEL_LAYOUTS = [
+  [
+    [1, 1, 1, 1, 1, 1],
+    [1, 2, 2, 2, 2, 1],
+    [1, 1, 2, 2, 1, 1],
+    [1, 1, 1, 1, 1, 1],
+  ],
+  [
+    [0, 2, 1, 1, 2, 0],
+    [1, 2, 2, 2, 2, 1],
+    [2, 1, 2, 2, 1, 2],
+    [1, 1, 1, 1, 1, 1],
+  ],
+  [
+    [2, 2, 1, 1, 2, 2],
+    [1, 2, 2, 2, 2, 1],
+    [2, 1, 2, 2, 1, 2],
+    [1, 2, 1, 1, 2, 1],
+  ],
+];
 const HAPTIC_PATTERNS = {
   tick: { pattern: 6, cooldown: 26 },
   navigate: { pattern: 8, cooldown: 38 },
@@ -110,6 +137,50 @@ const HAPTIC_PATTERNS = {
   select: { pattern: 18, cooldown: 82 },
   confirm: { pattern: [12, 22, 16], cooldown: 140 },
   success: { pattern: [14, 28, 18, 32, 24], cooldown: 260 },
+};
+const HAPTIC_AUDIO_PROFILES = {
+  tick: {
+    cooldown: 32,
+    pulses: [{ delay: 0, duration: 0.012, frequency: 920, gain: 0.016 }],
+    visual: "tick",
+  },
+  navigate: {
+    cooldown: 42,
+    pulses: [{ delay: 0, duration: 0.014, frequency: 860, gain: 0.019 }],
+    visual: "tick",
+  },
+  back: {
+    cooldown: 72,
+    pulses: [{ delay: 0, duration: 0.018, frequency: 700, gain: 0.024 }],
+    visual: "soft",
+  },
+  transport: {
+    cooldown: 62,
+    pulses: [{ delay: 0, duration: 0.015, frequency: 780, gain: 0.021 }],
+    visual: "soft",
+  },
+  select: {
+    cooldown: 86,
+    pulses: [{ delay: 0, duration: 0.022, frequency: 760, gain: 0.03 }],
+    visual: "strong",
+  },
+  confirm: {
+    cooldown: 145,
+    pulses: [
+      { delay: 0, duration: 0.016, frequency: 780, gain: 0.026 },
+      { delay: 0.04, duration: 0.018, frequency: 920, gain: 0.03 },
+    ],
+    visual: "strong",
+  },
+  success: {
+    cooldown: 270,
+    pulses: [
+      { delay: 0, duration: 0.014, frequency: 760, gain: 0.028 },
+      { delay: 0.05, duration: 0.017, frequency: 900, gain: 0.032 },
+      { delay: 0.11, duration: 0.02, frequency: 1080, gain: 0.036 },
+    ],
+    visual: "success",
+  },
 };
 const DEVICE_PRESETS = {
   "ipod-classic-5g": {
@@ -171,6 +242,7 @@ let libraryPath = ["main"];
 let screenScrollAccumulator = 0;
 let syncPollTimer = null;
 let brickLoopTimer = null;
+let brickCountdownTimer = null;
 let syncViewState = {
   state: "no_device",
   headline: "Connect iPod to sync",
@@ -182,21 +254,106 @@ let syncViewState = {
 
 const haptics = (() => {
   const lastFireTimes = new Map();
+  const activeVisualClasses = [
+    "is-feedback-tick",
+    "is-feedback-soft",
+    "is-feedback-strong",
+    "is-feedback-success",
+  ];
+  let audioContext = null;
 
-  function isSupported() {
+  function isTouchLikeDevice() {
     return (
       typeof window !== "undefined" &&
       typeof navigator !== "undefined" &&
-      typeof navigator.vibrate === "function" &&
       navigator.maxTouchPoints > 0 &&
       typeof window.matchMedia === "function" &&
       window.matchMedia("(pointer: coarse)").matches
     );
   }
 
+  function supportsVibration() {
+    return (
+      isTouchLikeDevice() &&
+      typeof navigator.vibrate === "function" &&
+      navigator.vibrate !== undefined
+    );
+  }
+
+  function getAudioContext() {
+    if (!isTouchLikeDevice() || typeof window === "undefined") {
+      return null;
+    }
+    if (!audioContext) {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) {
+        return null;
+      }
+      audioContext = new AudioContextCtor();
+    }
+    return audioContext;
+  }
+
+  function prime() {
+    const context = getAudioContext();
+    if (context && context.state === "suspended") {
+      void context.resume().catch(() => {});
+    }
+  }
+
+  function playAudioFeedback(kind) {
+    const profile = HAPTIC_AUDIO_PROFILES[kind];
+    const context = getAudioContext();
+    if (!profile || !context) {
+      return;
+    }
+
+    prime();
+    const startAt = context.currentTime + 0.001;
+    profile.pulses.forEach((pulse) => {
+      const oscillator = context.createOscillator();
+      const gainNode = context.createGain();
+      oscillator.type = "triangle";
+      oscillator.frequency.setValueAtTime(pulse.frequency, startAt + pulse.delay);
+      gainNode.gain.setValueAtTime(0.0001, startAt + pulse.delay);
+      gainNode.gain.exponentialRampToValueAtTime(pulse.gain, startAt + pulse.delay + 0.004);
+      gainNode.gain.exponentialRampToValueAtTime(
+        0.0001,
+        startAt + pulse.delay + pulse.duration
+      );
+      oscillator.connect(gainNode);
+      gainNode.connect(context.destination);
+      oscillator.start(startAt + pulse.delay);
+      oscillator.stop(startAt + pulse.delay + pulse.duration + 0.012);
+    });
+  }
+
+  function pulseVisual(kind) {
+    if (!isTouchLikeDevice() || !clickWheel) {
+      return;
+    }
+
+    const profile = HAPTIC_AUDIO_PROFILES[kind];
+    const visualClass =
+      profile?.visual === "success"
+        ? "is-feedback-success"
+        : profile?.visual === "strong"
+          ? "is-feedback-strong"
+          : profile?.visual === "soft"
+            ? "is-feedback-soft"
+            : "is-feedback-tick";
+
+    activeVisualClasses.forEach((className) => clickWheel.classList.remove(className));
+    void clickWheel.offsetWidth;
+    clickWheel.classList.add(visualClass);
+    window.setTimeout(() => {
+      clickWheel.classList.remove(visualClass);
+    }, 170);
+  }
+
   function fire(kind) {
-    const config = HAPTIC_PATTERNS[kind];
-    if (!config || !isSupported()) {
+    const config = supportsVibration() ? HAPTIC_PATTERNS[kind] : HAPTIC_AUDIO_PROFILES[kind];
+    if (!config || !isTouchLikeDevice()) {
       return;
     }
 
@@ -207,10 +364,16 @@ const haptics = (() => {
     }
 
     lastFireTimes.set(kind, now);
-    navigator.vibrate(config.pattern);
+    if (supportsVibration()) {
+      navigator.vibrate(HAPTIC_PATTERNS[kind].pattern);
+    } else {
+      playAudioFeedback(kind);
+      pulseVisual(kind);
+    }
   }
 
   return {
+    prime,
     tick() {
       fire("tick");
     },
@@ -930,16 +1093,24 @@ function moveLibrarySelection(step, source = "generic") {
   highlightedSongId = selectedItem?.type === "song" ? selectedItem.id : "";
   if (source === "wheel") {
     haptics.tick();
+  } else {
+    haptics.navigate();
   }
-  haptics.navigate();
   syncUi();
 }
 
-function getWheelAngle(event) {
+function getWheelPolarPosition(event) {
   const rect = clickWheel.getBoundingClientRect();
   const centerX = rect.left + rect.width / 2;
   const centerY = rect.top + rect.height / 2;
-  return Math.atan2(event.clientY - centerY, event.clientX - centerX);
+  const deltaX = event.clientX - centerX;
+  const deltaY = event.clientY - centerY;
+  const radius = Math.hypot(deltaX, deltaY);
+  const normalizedRadius = radius / (Math.min(rect.width, rect.height) / 2);
+  return {
+    angle: Math.atan2(deltaY, deltaX),
+    normalizedRadius,
+  };
 }
 
 function normalizeAngleDelta(delta) {
@@ -952,6 +1123,13 @@ function normalizeAngleDelta(delta) {
   }
 
   return delta;
+}
+
+function isWheelRingPosition(position) {
+  return (
+    position.normalizedRadius >= WHEEL_RING_INNER_RATIO &&
+    position.normalizedRadius <= WHEEL_RING_OUTER_RATIO
+  );
 }
 
 function stopWheelDrag() {
@@ -1217,19 +1395,26 @@ function renderSyncScreen() {
   syncAction.setAttribute("aria-hidden", syncViewState.canStart ? "false" : "true");
 }
 
-function createBrickBricks() {
+function createBrickBricks(level) {
+  const layout = BRICK_LEVEL_LAYOUTS[Math.max(0, level - 1)] || BRICK_LEVEL_LAYOUTS[0];
   const brickWidth = (BRICK_CANVAS_WIDTH - BRICK_SIDE_MARGIN * 2 - BRICK_PADDING * (BRICK_COLUMNS - 1)) / BRICK_COLUMNS;
   const brickHeight = 14;
   const bricks = [];
 
-  for (let rowIndex = 0; rowIndex < BRICK_ROWS; rowIndex += 1) {
+  for (let rowIndex = 0; rowIndex < layout.length; rowIndex += 1) {
     for (let columnIndex = 0; columnIndex < BRICK_COLUMNS; columnIndex += 1) {
+      const hitPoints = layout[rowIndex][columnIndex] || 0;
+      if (hitPoints === 0) {
+        continue;
+      }
       bricks.push({
         x: BRICK_SIDE_MARGIN + columnIndex * (brickWidth + BRICK_PADDING),
         y: BRICK_TOP_OFFSET + rowIndex * (brickHeight + BRICK_PADDING),
         width: brickWidth,
         height: brickHeight,
         alive: true,
+        hitPoints,
+        maxHitPoints: hitPoints,
       });
     }
   }
@@ -1237,18 +1422,39 @@ function createBrickBricks() {
   return bricks;
 }
 
-function createBrickSession() {
-  return {
+function getBrickBaseSpeed(level) {
+  return 2.45 + (level - 1) * 0.22;
+}
+
+function resetBrickBall(brickSession, level, direction = Math.random() < 0.5 ? -1 : 1) {
+  const speed = getBrickBaseSpeed(level);
+  brickSession.ballSpeed = speed;
+  brickSession.ballX = BRICK_CANVAS_WIDTH / 2;
+  brickSession.ballY = BRICK_CANVAS_HEIGHT - 38;
+  brickSession.ballRadius = 5;
+  brickSession.ballVX = direction * speed * 0.62;
+  brickSession.ballVY = -speed * 0.96;
+  brickSession.lastPaddleStep = 0;
+}
+
+function createBrickSession(level) {
+  const brickSession = {
     paddleX: BRICK_CANVAS_WIDTH / 2 - 34,
     paddleWidth: 68,
     paddleHeight: 8,
-    ballX: BRICK_CANVAS_WIDTH / 2,
-    ballY: BRICK_CANVAS_HEIGHT - 36,
-    ballRadius: 5,
-    ballVX: 2.2,
-    ballVY: -2.8,
-    bricks: createBrickBricks(),
+    bricks: createBrickBricks(level),
+    ballSpeed: getBrickBaseSpeed(level),
+    lastPaddleStep: 0,
   };
+  resetBrickBall(brickSession, level);
+  return brickSession;
+}
+
+function stopBrickCountdown() {
+  if (brickCountdownTimer) {
+    window.clearInterval(brickCountdownTimer);
+    brickCountdownTimer = null;
+  }
 }
 
 function stopBrickLoop() {
@@ -1306,12 +1512,15 @@ function createBrickGameState() {
     id: "brick",
     phase: "intro",
     title: "Brick",
-    subtitle: "Classic block breaker",
+    subtitle: "Level 1",
     instructions: "Press center to start",
-    footer: "Left/Right move paddle",
+    footer: "",
     score: 0,
-    brick: createBrickSession(),
+    level: 1,
+    lives: 3,
+    brick: createBrickSession(1),
     showHud: true,
+    roundLabel: "L1",
   };
 }
 
@@ -1383,8 +1592,9 @@ function renderBrickCanvas() {
     if (!block.alive) {
       return;
     }
-    const shade = 210 - (index % BRICK_COLUMNS) * 12;
-    context.fillStyle = `rgb(${shade}, ${Math.max(165, shade - 24)}, ${Math.max(140, shade - 58)})`;
+    const depth = block.maxHitPoints > 1 ? 36 : 0;
+    const shade = 210 - (index % BRICK_COLUMNS) * 12 - depth;
+    context.fillStyle = `rgb(${shade}, ${Math.max(162, shade - 24)}, ${Math.max(136, shade - 58)})`;
     context.fillRect(block.x, block.y, block.width, block.height);
   });
 
@@ -1402,8 +1612,9 @@ function renderGameScreen() {
   const isBrick = gameState.id === "brick";
   const isMusicQuiz = gameState.id === "music-quiz";
   const isQuizQuestion = isMusicQuiz && gameState.phase === "question";
+  const isBrickPaused = isBrick && gameState.phase === "paused";
   const showCanvas = isBrick;
-  const showMessage = !isQuizQuestion;
+  const showMessage = isBrick ? gameState.phase !== "playing" : !isQuizQuestion;
 
   gameScreenBody.dataset.gameId = gameState.id || "";
   gameScreenBody.dataset.gamePhase = gameState.phase || "intro";
@@ -1415,10 +1626,23 @@ function renderGameScreen() {
   gameCanvas.setAttribute("aria-hidden", showCanvas ? "false" : "true");
   gameMessageScreen.classList.toggle("hidden", !showMessage);
   musicQuizPanel.classList.toggle("hidden", !isQuizQuestion);
-  gameTitle.textContent = gameState.title || "";
-  gameSubtitle.textContent = gameState.subtitle || "";
-  gameInstructions.textContent = gameState.instructions || "";
+  gamePauseOverlay.classList.toggle("hidden", !isBrickPaused);
+  gamePauseOverlay.setAttribute("aria-hidden", isBrickPaused ? "false" : "true");
+  gameTitle.textContent = isBrickPaused ? "" : (gameState.title || "");
+  gameSubtitle.textContent = isBrickPaused ? "" : (gameState.subtitle || "");
+  gameInstructions.textContent = isBrickPaused ? "" : (gameState.instructions || "");
   gameFooter.textContent = gameState.footer || "";
+  gameLives.innerHTML = "";
+  gameLives.classList.toggle("hidden", !(isBrick && Number.isFinite(gameState.lives) && gameState.lives > 0));
+  gameLives.setAttribute("aria-hidden", isBrick && Number.isFinite(gameState.lives) && gameState.lives > 0 ? "false" : "true");
+
+  if (isBrick && Number.isFinite(gameState.lives) && gameState.lives > 0) {
+    Array.from({ length: gameState.lives }).forEach(() => {
+      const heart = document.createElement("span");
+      heart.className = "game-life-heart";
+      gameLives.appendChild(heart);
+    });
+  }
 
   if (showCanvas) {
     renderBrickCanvas();
@@ -1454,13 +1678,89 @@ function syncGameHud() {
   gameRoundLabel.textContent = currentGame.roundLabel || "";
 }
 
-function finishBrickGame(victory) {
+function updateBrickRoundLabel() {
+  if (!currentGame || currentGame.id !== "brick") {
+    return;
+  }
+  currentGame.roundLabel = `L${currentGame.level}`;
+  syncGameHud();
+}
+
+function startBrickCountdown(label = "3") {
   stopBrickLoop();
+  stopBrickCountdown();
+  let remaining = Number(label) || 3;
+  currentGame.phase = "countdown";
+  currentGame.title = "Brick";
+  currentGame.subtitle = String(remaining);
+  currentGame.instructions = "Get ready";
+  currentGame.footer = "";
+  syncUi();
+
+  brickCountdownTimer = window.setInterval(() => {
+    remaining -= 1;
+    if (remaining <= 0) {
+      stopBrickCountdown();
+      currentGame.phase = "playing";
+      currentGame.title = "Brick";
+      currentGame.subtitle = `Level ${currentGame.level}`;
+      currentGame.instructions = "";
+      currentGame.footer = "";
+      startBrickLoop();
+      syncUi();
+      return;
+    }
+
+    currentGame.subtitle = String(remaining);
+    syncUi();
+  }, 650);
+}
+
+function advanceBrickLevel() {
+  stopBrickLoop();
+  stopBrickCountdown();
+  if (currentGame.level < BRICK_LEVEL_LAYOUTS.length) {
+    currentGame.level += 1;
+    currentGame.brick = createBrickSession(currentGame.level);
+    updateBrickRoundLabel();
+    currentGame.phase = "level-complete";
+    currentGame.title = "Level Clear";
+    currentGame.subtitle = `Next: Level ${currentGame.level}`;
+    currentGame.instructions = "Press center to continue";
+    currentGame.footer = "";
+    syncUi();
+    return;
+  }
+
   currentGame.phase = "gameover";
-  currentGame.title = victory ? "You Win" : "Game Over";
+  currentGame.title = "You Win";
   currentGame.subtitle = `Score ${currentGame.score}`;
   currentGame.instructions = "Press center to restart";
-  currentGame.footer = "Menu returns to Games";
+  currentGame.footer = "";
+  syncUi();
+}
+
+function finishBrickLife() {
+  stopBrickLoop();
+  stopBrickCountdown();
+  currentGame.lives -= 1;
+  if (currentGame.lives <= 0) {
+    currentGame.phase = "gameover";
+    currentGame.title = "Game Over";
+    currentGame.subtitle = `Score ${currentGame.score}`;
+    currentGame.instructions = "Press center to restart";
+    currentGame.footer = "";
+    syncUi();
+    return;
+  }
+
+  resetBrickBall(currentGame.brick, currentGame.level);
+  updateBrickRoundLabel();
+  currentGame.phase = "lost-ball";
+  currentGame.title = "Ball Lost";
+  currentGame.subtitle = `${currentGame.lives} balls left`;
+  currentGame.instructions = "Press center to continue";
+  currentGame.footer = "";
   syncUi();
 }
 
@@ -1492,8 +1792,15 @@ function tickBrickGame() {
     brick.ballVY > 0
   ) {
     const relativeHit = (brick.ballX - (brick.paddleX + brick.paddleWidth / 2)) / (brick.paddleWidth / 2);
-    brick.ballVX = relativeHit * 3.2;
-    brick.ballVY = -Math.max(2.4, Math.abs(brick.ballVY));
+    const currentSpeed = Math.min(4.9, Math.hypot(brick.ballVX, brick.ballVY) + 0.06);
+    const bounceAngle = relativeHit * 1.05 + brick.lastPaddleStep * 0.08;
+    brick.ballVX = currentSpeed * Math.sin(bounceAngle);
+    brick.ballVY = -Math.max(2.5, currentSpeed * Math.cos(bounceAngle));
+    if (Math.abs(brick.ballVX) < 0.85) {
+      brick.ballVX = 0.85 * (brick.ballVX < 0 ? -1 : 1);
+    }
+    brick.ballSpeed = Math.hypot(brick.ballVX, brick.ballVY);
+    brick.lastPaddleStep = 0;
   }
 
   for (const block of brick.bricks) {
@@ -1507,20 +1814,32 @@ function tickBrickGame() {
       continue;
     }
 
-    block.alive = false;
+    block.hitPoints -= 1;
+    block.alive = block.hitPoints > 0;
     brick.ballVY *= -1;
-    currentGame.score += 10;
+    currentGame.score += block.alive ? 5 : 15;
+    const currentSpeed = Math.max(0.001, Math.hypot(brick.ballVX, brick.ballVY));
+    const nextSpeed = Math.min(5.2, currentSpeed + 0.05);
+    const directionX = brick.ballVX === 0 ? 1 : Math.sign(brick.ballVX);
+    const directionY = brick.ballVY === 0 ? -1 : Math.sign(brick.ballVY);
+    brick.ballVX = directionX * Math.max(0.9, (Math.abs(brick.ballVX) / currentSpeed) * nextSpeed);
+    brick.ballVY = directionY * Math.max(2.1, (Math.abs(brick.ballVY) / currentSpeed) * nextSpeed);
+    const normalizedSpeed = Math.max(0.001, Math.hypot(brick.ballVX, brick.ballVY));
+    const scale = nextSpeed / normalizedSpeed;
+    brick.ballVX *= scale;
+    brick.ballVY *= scale;
+    brick.ballSpeed = Math.hypot(brick.ballVX, brick.ballVY);
     syncGameHud();
     break;
   }
 
   if (brick.bricks.every((block) => !block.alive)) {
-    finishBrickGame(true);
+    advanceBrickLevel();
     return;
   }
 
   if (brick.ballY - brick.ballRadius > BRICK_CANVAS_HEIGHT) {
-    finishBrickGame(false);
+    finishBrickLife();
     return;
   }
 
@@ -1534,16 +1853,11 @@ function startBrickLoop() {
 
 function beginBrickGame() {
   stopBrickLoop();
+  stopBrickCountdown();
   currentGame = createBrickGameState();
-  currentGame.phase = "playing";
-  currentGame.title = "Brick";
-  currentGame.subtitle = "";
-  currentGame.instructions = "";
-  currentGame.footer = "Center pauses";
-  currentGame.roundLabel = "";
+  updateBrickRoundLabel();
   haptics.confirm();
-  startBrickLoop();
-  syncUi();
+  startBrickCountdown(3);
 }
 
 function beginMusicQuizRound() {
@@ -1617,6 +1931,7 @@ function moveBrickPaddle(step) {
     return;
   }
 
+  currentGame.brick.lastPaddleStep = step;
   currentGame.brick.paddleX = Math.max(
     8,
     Math.min(BRICK_CANVAS_WIDTH - currentGame.brick.paddleWidth - 8, currentGame.brick.paddleX + step * 26)
@@ -1663,26 +1978,30 @@ function handleGameSelect() {
       return;
     }
 
+    if (currentGame.phase === "lost-ball" || currentGame.phase === "level-complete") {
+      haptics.confirm();
+      startBrickCountdown(3);
+      return;
+    }
+
+    if (currentGame.phase === "countdown") {
+      return;
+    }
+
     haptics.select();
     if (currentGame.phase === "playing") {
       currentGame.phase = "paused";
       currentGame.title = "Brick";
       currentGame.subtitle = "Paused";
-      currentGame.instructions = "Press center to resume";
-      currentGame.footer = "Menu returns to Games";
+      currentGame.instructions = "";
+      currentGame.footer = "";
       stopBrickLoop();
       syncUi();
       return;
     }
 
     if (currentGame.phase === "paused") {
-      currentGame.phase = "playing";
-      currentGame.title = "Brick";
-      currentGame.subtitle = "";
-      currentGame.instructions = "";
-      currentGame.footer = "Center pauses";
-      startBrickLoop();
-      syncUi();
+      startBrickCountdown(3);
     }
     return;
   }
@@ -2394,6 +2713,7 @@ document.querySelectorAll("[data-wheel-theme]").forEach((button) => {
 });
 
 menuButton.addEventListener("click", () => {
+  haptics.prime();
   haptics.back();
   if (screenMode === "library") {
     if (libraryPath.length > 1) {
@@ -2409,6 +2729,7 @@ menuButton.addEventListener("click", () => {
     }
     if (screenMode === "game") {
       stopBrickLoop();
+      stopBrickCountdown();
       libraryPath = ["main", "games"];
       selectedIndex = Math.max(0, getGameMenuIndex(currentGame?.id || ""));
       currentGame = null;
@@ -2440,6 +2761,7 @@ menuButton.addEventListener("click", () => {
 });
 
 rewindButton.addEventListener("click", async () => {
+  haptics.prime();
   haptics.transport();
   if (screenMode === "library") {
     moveLibrarySelection(-1, "button");
@@ -2480,6 +2802,7 @@ rewindButton.addEventListener("click", async () => {
 });
 
 forwardButton.addEventListener("click", async () => {
+  haptics.prime();
   haptics.transport();
   if (screenMode === "library") {
     moveLibrarySelection(1, "button");
@@ -2585,10 +2908,17 @@ clickWheel.addEventListener("pointerdown", (event) => {
     return;
   }
 
+  const position = getWheelPolarPosition(event);
+  if (!isWheelRingPosition(position)) {
+    return;
+  }
+
+  haptics.prime();
   wheelDrag = {
     pointerId: event.pointerId,
-    lastAngle: getWheelAngle(event),
+    lastAngle: position.angle,
     accumulatedAngle: 0,
+    smoothedDelta: 0,
   };
   clickWheel.classList.add("is-scrolling");
   clickWheel.setPointerCapture(event.pointerId);
@@ -2600,21 +2930,33 @@ clickWheel.addEventListener("pointermove", (event) => {
     return;
   }
 
-  const SCROLL_STEP_ANGLE = Math.PI / 9;
-  const nextAngle = getWheelAngle(event);
-  const delta = normalizeAngleDelta(nextAngle - wheelDrag.lastAngle);
-
+  const position = getWheelPolarPosition(event);
+  const nextAngle = position.angle;
+  let delta = normalizeAngleDelta(nextAngle - wheelDrag.lastAngle);
   wheelDrag.lastAngle = nextAngle;
-  wheelDrag.accumulatedAngle += delta;
 
-  while (wheelDrag.accumulatedAngle >= SCROLL_STEP_ANGLE) {
-    moveLibrarySelection(1, "wheel");
-    wheelDrag.accumulatedAngle -= SCROLL_STEP_ANGLE;
+  if (!isWheelRingPosition(position)) {
+    wheelDrag.smoothedDelta *= 0.6;
+    return;
   }
 
-  while (wheelDrag.accumulatedAngle <= -SCROLL_STEP_ANGLE) {
+  if (Math.abs(delta) > WHEEL_MAX_DELTA) {
+    delta = Math.sign(delta) * WHEEL_MAX_DELTA;
+  }
+
+  wheelDrag.smoothedDelta =
+    wheelDrag.smoothedDelta * WHEEL_DELTA_SMOOTHING +
+    delta * (1 - WHEEL_DELTA_SMOOTHING);
+  wheelDrag.accumulatedAngle += wheelDrag.smoothedDelta;
+
+  while (wheelDrag.accumulatedAngle >= WHEEL_DETENT_ANGLE) {
+    moveLibrarySelection(1, "wheel");
+    wheelDrag.accumulatedAngle -= WHEEL_DETENT_ANGLE;
+  }
+
+  while (wheelDrag.accumulatedAngle <= -WHEEL_DETENT_ANGLE) {
     moveLibrarySelection(-1, "wheel");
-    wheelDrag.accumulatedAngle += SCROLL_STEP_ANGLE;
+    wheelDrag.accumulatedAngle += WHEEL_DETENT_ANGLE;
   }
 });
 
@@ -2643,6 +2985,7 @@ metadataForm.addEventListener("submit", async (event) => {
 
   saveActiveMetadata();
   isExporting = true;
+  haptics.prime();
   haptics.confirm();
   syncSelectButton();
   setMessage(`Converting ${activeUpload.originalName}...`);
@@ -2718,6 +3061,7 @@ metadataForm.addEventListener("submit", async (event) => {
 });
 
 selectButton.addEventListener("click", async () => {
+  haptics.prime();
   if (isExporting) {
     return;
   }
@@ -2757,6 +3101,7 @@ playbackButton.addEventListener("click", async () => {
     return;
   }
 
+  haptics.prime();
   haptics.transport();
   if (!previewAudio.src) {
     previewAudio.src = currentSong.playbackUrl;

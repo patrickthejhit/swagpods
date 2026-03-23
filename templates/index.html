@@ -325,6 +325,10 @@
                   <div class="game-stage">
                     <canvas id="game-canvas" class="game-canvas hidden" width="320" height="190" aria-hidden="true"></canvas>
                     <div id="game-message-screen" class="game-message-screen">
+                      <div id="game-pause-overlay" class="game-pause-overlay hidden" aria-hidden="true">
+                        <span class="game-pause-bar"></span>
+                        <span class="game-pause-bar"></span>
+                      </div>
                       <p id="game-title" class="game-title"></p>
                       <p id="game-subtitle" class="game-subtitle"></p>
                       <p id="game-instructions" class="game-instructions"></p>
@@ -334,6 +338,7 @@
                       <p id="music-quiz-prompt" class="music-quiz-prompt"></p>
                       <ul id="music-quiz-choices" class="music-quiz-choices" aria-label="Music quiz choices"></ul>
                     </div>
+                    <div id="game-lives" class="game-lives hidden" aria-label="Lives remaining"></div>
                   </div>
                   <p id="game-footer" class="game-footer"></p>
                 </div>

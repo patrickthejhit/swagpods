@@ -1605,8 +1605,14 @@ code {
   padding: 0.9rem 0.8rem;
 }
 
+.game-screen-body[data-game-id="brick"] .game-footer {
+  display: none;
+}
+
 .game-message-screen.hidden,
-.music-quiz-panel.hidden {
+.music-quiz-panel.hidden,
+.game-pause-overlay.hidden,
+.game-lives.hidden {
   display: none;
 }
 
@@ -1642,12 +1648,69 @@ code {
   line-height: 1.35;
 }
 
+.game-pause-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-auto-flow: column;
+  align-content: center;
+  justify-content: center;
+  gap: 0.9rem;
+}
+
+.game-pause-bar {
+  width: 0.8rem;
+  height: 4.2rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.18);
+}
+
 .game-footer {
   min-height: 0.82rem;
   color: #405447;
   font-size: 0.64rem;
   line-height: 1.25;
   text-align: center;
+}
+
+.game-lives {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.45rem;
+  display: flex;
+  gap: 0.16rem;
+  align-items: center;
+  pointer-events: none;
+}
+
+.game-life-heart {
+  position: relative;
+  width: 0.7rem;
+  height: 0.62rem;
+  transform: rotate(-45deg);
+  background: linear-gradient(180deg, #fff7f8 0%, #e9b8bf 100%);
+  border-radius: 0.12rem;
+}
+
+.game-life-heart::before,
+.game-life-heart::after {
+  content: "";
+  position: absolute;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: inherit;
+}
+
+.game-life-heart::before {
+  top: -0.34rem;
+  left: 0;
+}
+
+.game-life-heart::after {
+  top: 0;
+  left: 0.34rem;
 }
 
 .music-quiz-panel {
@@ -2090,10 +2153,47 @@ code {
   user-select: none;
   cursor: grab;
   z-index: 2;
+  transition:
+    transform 90ms ease-out,
+    box-shadow 110ms ease-out,
+    filter 110ms ease-out;
 }
 
 .click-wheel.is-scrolling {
   cursor: grabbing;
+}
+
+.click-wheel.is-feedback-tick,
+.click-wheel.is-feedback-soft,
+.click-wheel.is-feedback-strong,
+.click-wheel.is-feedback-success {
+  cursor: grabbing;
+}
+
+.click-wheel.is-feedback-tick {
+  transform: scale(0.995);
+  filter: brightness(1.03);
+}
+
+.click-wheel.is-feedback-soft {
+  transform: scale(0.992);
+  filter: brightness(1.035);
+}
+
+.click-wheel.is-feedback-strong {
+  transform: scale(0.987);
+  filter: brightness(1.045);
+}
+
+.click-wheel.is-feedback-success {
+  transform: scale(0.985);
+  filter: brightness(1.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -14px 18px rgba(0, 0, 0, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 0 0 2px rgba(255, 255, 255, 0.06),
+    0 10px 18px rgba(0, 0, 0, 0.16);
 }
 
 .wheel-zone,
