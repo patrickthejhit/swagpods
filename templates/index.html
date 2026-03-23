@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SwagPods</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="device-stage">
+        <header class="swagpods-brandmark" aria-label="swagpods">
+          <img
+            class="swagpods-brandmark-image"
+            src="{{ url_for('static', filename='images/swagpods-logo-mark.png') }}"
+            alt="SwagPods logo"
+          >
+        </header>
+        <section id="ipod-device" class="ipod-device" aria-label="SwagPods converter" data-faceplate-theme="green-clear">
+          <div class="device-hardware-layer" aria-hidden="true">
+            <div class="hardware-battery"></div>
+            <div class="hardware-board hardware-board-primary"></div>
+            <div class="hardware-board hardware-board-secondary"></div>
+            <div class="hardware-connector hardware-connector-top"></div>
+            <div class="hardware-connector hardware-connector-bottom"></div>
+            <div class="hardware-chip hardware-chip-large"></div>
+            <div class="hardware-chip hardware-chip-small"></div>
+            <div class="hardware-chip hardware-chip-micro"></div>
+            <div class="hardware-ribbon hardware-ribbon-main"></div>
+            <div class="hardware-ribbon hardware-ribbon-lower"></div>
+            <div class="hardware-traces hardware-traces-upper"></div>
+            <div class="hardware-traces hardware-traces-lower"></div>
+            <div class="hardware-traces hardware-traces-fine"></div>
+            <span class="hardware-anchor hardware-anchor-top-left"></span>
+            <span class="hardware-anchor hardware-anchor-top-right"></span>
+            <span class="hardware-anchor hardware-anchor-bottom-left"></span>
+            <span class="hardware-anchor hardware-anchor-bottom-right"></span>
+          </div>
+          <div class="screen-bezel">
+            <section id="ipod-screen" class="ipod-screen" aria-label="SwagPods screen">
+              <div id="idle-state" class="screen-state idle-state hidden">
+                <div class="screen-status-bar">
+                  <span class="screen-status-title">Main Menu</span>
+                  <div class="battery-indicator" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <h1>iPod</h1>
+              </div>
+
+              <section id="editor-panel" class="screen-state editor hidden">
+                <div class="screen-status-bar">
+                  <span class="screen-status-title">Convert</span>
+                  <div class="battery-indicator" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <div id="convert-upload-view" class="convert-upload-view">
+                  <div id="convert-dropzone" class="convert-dropzone">
+                    <p class="convert-drop-title">Drop File</p>
+                    <p class="convert-drop-subtitle">audio or video</p>
+                    <button id="picker-button" type="button" class="screen-choose-button">Choose File</button>
+                  </div>
+                </div>
+
+                <div id="convert-details" class="convert-details hidden">
+                  <div class="convert-file-card">
+                    <p class="convert-section-label">Selected File</p>
+                    <p id="file-summary" class="track-name convert-file-name">No file selected</p>
+                    <p id="guess-summary" class="guess-summary"></p>
+                  </div>
+
+                  <div class="convert-format-row" aria-label="Format options">
+                    <span class="convert-section-label">Output</span>
+                    <span id="convert-format-value" class="convert-format-value">Ready</span>
+                  </div>
+
+                  <form id="metadata-form" class="metadata-form">
+                    <div class="convert-video-options convert-common-options">
+                      <div class="convert-option-card convert-option-card-wide">
+                        <label class="convert-section-label" for="optimize-for">Optimize For</label>
+                        <select id="optimize-for" name="optimize-for" class="screen-select">
+                          <option value="ipod-classic-5g">iPod Classic 5th Gen</option>
+                          <option value="ipod-classic-5-5g">iPod Classic 5.5th Gen</option>
+                          <option value="ipod-classic-6g">iPod Classic 6th Gen</option>
+                          <option value="ipod-classic-7g">iPod Classic 7th Gen</option>
+                          <option value="ipod-nano">iPod Nano</option>
+                          <option value="ipod-video">iPod Video</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <section id="audio-setup-panel" class="convert-setup-panel hidden" aria-label="Audio conversion setup">
+                      <p class="convert-section-label">Audio Metadata</p>
+                      <div class="meta-field-group">
+                        <label class="meta-row">
+                          <span>Title</span>
+                          <input id="title" name="title" type="text" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Artist</span>
+                          <input id="artist" name="artist" type="text" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Album</span>
+                          <input id="album" name="album" type="text" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Genre</span>
+                          <input id="genre" name="genre" type="text" autocomplete="off">
+                        </label>
+                      </div>
+                    </section>
+
+                    <section id="video-setup-panel" class="convert-setup-panel hidden" aria-label="Video conversion setup">
+                      <div class="convert-video-options">
+                        <div class="convert-option-card convert-option-card-wide">
+                          <label class="convert-section-label" for="video-quality">Quality</label>
+                          <select id="video-quality" name="video-quality" class="screen-select">
+                            <option value="standard">Standard</option>
+                            <option value="high">High</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="convert-option-card convert-preset-card">
+                        <p class="convert-section-label">Preset</p>
+                        <p id="video-preset-label" class="convert-preset-value">iPod 5th/5.5 Gen Video</p>
+                        <p id="video-preset-summary" class="guess-summary">320×240 H.264 / AAC</p>
+                      </div>
+                      <p class="convert-section-label">Metadata</p>
+                      <div class="meta-field-group">
+                        <label class="meta-row">
+                          <span>Title</span>
+                          <input id="video-title" name="video-title" type="text" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Show</span>
+                          <input id="video-show" name="video-show" type="text" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Episode</span>
+                          <input id="video-episode-title" name="video-episode-title" type="text" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Season</span>
+                          <input id="video-season-number" name="video-season-number" type="text" inputmode="numeric" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Ep #</span>
+                          <input id="video-episode-number" name="video-episode-number" type="text" inputmode="numeric" autocomplete="off">
+                        </label>
+                        <label class="meta-row">
+                          <span>Artist</span>
+                          <input id="video-artist" name="video-artist" type="text" autocomplete="off">
+                        </label>
+                      </div>
+                    </section>
+
+                    <button id="convert-submit-button" type="submit" class="screen-convert-button">
+                      Convert
+                    </button>
+                  </form>
+
+                  <p id="screen-control-hint" class="screen-control-hint">Press center to convert</p>
+                </div>
+
+                <section id="convert-result-view" class="convert-result-view hidden" aria-label="Conversion result">
+                  <div class="convert-result-artwork artwork-frame">
+                    <img id="convert-result-artwork" class="player-artwork hidden" alt="Converted song artwork">
+                    <div id="convert-result-placeholder" class="artwork-placeholder" aria-hidden="true">♪</div>
+                  </div>
+                  <p id="convert-result-title" class="convert-result-title"></p>
+                  <p id="convert-result-artist" class="convert-result-artist"></p>
+                  <p id="convert-result-meta" class="convert-result-meta"></p>
+                  <a id="convert-download-button" class="download-now-button is-disabled" href="#" download aria-disabled="true">Download</a>
+                </section>
+              </section>
+
+              <section id="library-panel" class="screen-state library-panel" aria-label="Library">
+                <div class="track-header">
+                  <div class="screen-header-row">
+                    <div>
+                      <p id="library-label" class="track-label">Library</p>
+                      <p id="library-title" class="track-name">Main Menu</p>
+                    </div>
+                    <div class="battery-indicator" aria-hidden="true">
+                      <span class="battery-shell">
+                        <span class="battery-level"></span>
+                      </span>
+                      <span class="battery-cap"></span>
+                    </div>
+                  </div>
+                  <p id="library-summary" class="guess-summary">No converted songs yet.</p>
+                </div>
+                <div class="library-viewport">
+                  <div id="library-selection-bar" class="library-selection-bar hidden" aria-hidden="true"></div>
+                  <ul id="library-list" class="library-list" aria-label="Song library"></ul>
+                </div>
+              </section>
+
+              <section id="now-playing-panel" class="screen-state screen-now-playing hidden" aria-label="Now playing preview">
+                <div class="now-playing-header">
+                  <span>Now Playing</span>
+                  <div class="battery-indicator battery-indicator-light" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <div class="screen-now-playing-card">
+                  <div class="screen-now-playing-top">
+                    <div class="screen-now-playing-copy">
+                      <p id="player-title" class="player-title"></p>
+                      <p id="player-artist" class="player-detail"></p>
+                      <p id="player-album" class="player-detail player-album"></p>
+                    </div>
+                    <div class="artwork-frame screen-artwork-frame screen-artwork-thumb">
+                      <img id="player-artwork" class="player-artwork hidden" alt="Selected song artwork">
+                      <div id="artwork-placeholder" class="artwork-placeholder" aria-hidden="true">♪</div>
+                    </div>
+                  </div>
+                  <div class="screen-progress-block" aria-label="Playback progress">
+                    <div class="screen-progress-track">
+                      <div id="player-progress-fill" class="screen-progress-fill"></div>
+                    </div>
+                    <div class="screen-progress-times">
+                      <span id="player-elapsed">0:00</span>
+                      <span id="player-remaining">-0:00</span>
+                    </div>
+                    <a id="download-now-button" class="download-now-button is-disabled" href="#" download aria-disabled="true">Download Now</a>
+                  </div>
+                </div>
+              </section>
+
+              <section id="customize-panel-screen" class="screen-state customize-panel-screen hidden" aria-label="Customize">
+                <div class="screen-status-bar">
+                  <span class="screen-status-title">Customize</span>
+                  <div class="battery-indicator" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <div class="customize-screen-body">
+                  <section class="customize-screen-group" aria-label="Faceplate colors">
+                    <p class="customize-screen-label">Faceplate</p>
+                    <div class="customize-swatch-row">
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="classic" aria-label="Classic white faceplate">
+                        <span class="swatch-preview swatch-faceplate-classic"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="graphite" aria-label="Graphite faceplate">
+                        <span class="swatch-preview swatch-faceplate-graphite"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="blue" aria-label="Blue faceplate">
+                        <span class="swatch-preview swatch-faceplate-blue"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="rose" aria-label="Rose faceplate">
+                        <span class="swatch-preview swatch-faceplate-rose"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="clear" aria-label="Clear faceplate">
+                        <span class="swatch-preview swatch-faceplate-clear"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="frosted-clear" aria-label="Frosted clear faceplate">
+                        <span class="swatch-preview swatch-faceplate-frosted-clear"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="smoke-clear" aria-label="Smoke clear faceplate">
+                        <span class="swatch-preview swatch-faceplate-smoke-clear"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="ice-blue-clear" aria-label="Ice blue clear faceplate">
+                        <span class="swatch-preview swatch-faceplate-ice-blue-clear"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-faceplate-theme="pink-clear" aria-label="Pink clear faceplate">
+                        <span class="swatch-preview swatch-faceplate-pink-clear"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen is-active" data-faceplate-theme="green-clear" aria-label="Green clear faceplate">
+                        <span class="swatch-preview swatch-faceplate-green-clear"></span>
+                      </button>
+                    </div>
+                  </section>
+
+                  <section class="customize-screen-group" aria-label="Click wheel colors">
+                    <p class="customize-screen-label">Wheel</p>
+                    <div class="customize-swatch-row">
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-wheel-theme="classic" aria-label="Classic light click wheel">
+                        <span class="swatch-preview swatch-wheel-classic"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-wheel-theme="silver" aria-label="Silver click wheel">
+                        <span class="swatch-preview swatch-wheel-silver"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-wheel-theme="charcoal" aria-label="Charcoal click wheel">
+                        <span class="swatch-preview swatch-wheel-charcoal"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-wheel-theme="aqua" aria-label="Aqua click wheel">
+                        <span class="swatch-preview swatch-wheel-aqua"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen" data-wheel-theme="white" aria-label="White click wheel">
+                        <span class="swatch-preview swatch-wheel-white"></span>
+                      </button>
+                      <button type="button" class="theme-swatch theme-swatch-screen is-active" data-wheel-theme="black" aria-label="Black click wheel">
+                        <span class="swatch-preview swatch-wheel-black"></span>
+                      </button>
+                    </div>
+                  </section>
+                  <p class="customize-screen-hint">Tap a finish, then press Menu to return.</p>
+                </div>
+              </section>
+            </section>
+          </div>
+          <form id="upload-form" class="fallback-upload">
+            <input id="file-input" class="visually-hidden" type="file" name="file" accept=".mp3,.m4a,.aac,.wav,.aiff,.flac,.ogg,.mp4,.m4v,.mov,.avi,.mkv,audio/*,video/*">
+            <button id="upload-button" type="submit" form="upload-form" class="visually-hidden">Upload File</button>
+          </form>
+
+          <section id="click-wheel" class="click-wheel" aria-label="iPod click wheel">
+            <button id="menu-button" type="button" class="wheel-zone wheel-menu-button">MENU</button>
+            <button id="rewind-button" type="button" class="wheel-zone wheel-rewind-button" aria-label="Previous song">⏮</button>
+            <button id="forward-button" type="button" class="wheel-zone wheel-forward-button" aria-label="Next song">⏭</button>
+            <button id="playback-button" type="button" class="wheel-play-button" aria-label="Play or pause">⏯</button>
+            <button id="select-button" type="button" class="center-button" aria-label="Select">
+              <span class="visually-hidden">Select</span>
+            </button>
+          </section>
+        </section>
+
+        <audio id="preview-audio" preload="metadata"></audio>
+        <section id="message-box" class="message-box" aria-live="polite"></section>
+      </section>
+    </main>
+
+    <script>
+      window.APP_CONFIG = {
+        exportDir: {{ export_dir | tojson }},
+      };
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
