@@ -64,7 +64,7 @@
                 <div id="convert-upload-view" class="convert-upload-view">
                   <div id="convert-dropzone" class="convert-dropzone">
                     <p class="convert-drop-title">Drop File</p>
-                    <p class="convert-drop-subtitle">audio or video</p>
+                    <p class="convert-drop-subtitle">audio, video, or photo</p>
                     <button id="picker-button" type="button" class="screen-choose-button">Choose File</button>
                   </div>
                 </div>
@@ -204,6 +204,141 @@
                 </div>
               </section>
 
+              <section id="sync-panel" class="screen-state sync-panel hidden" aria-label="Sync utility">
+                <div class="screen-status-bar">
+                  <span class="screen-status-title">Sync</span>
+                  <div class="battery-indicator" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <div id="sync-screen-body" class="sync-screen-body" data-sync-state="no_device">
+                  <div id="sync-icon-set" class="sync-icon-set" data-sync-state="no_device" aria-hidden="true">
+                    <div class="sync-icon sync-icon-cable">
+                      <svg class="sync-cable-graphic" viewBox="0 0 80 92" aria-hidden="true" focusable="false">
+                        <defs>
+                          <linearGradient id="syncCableSheath" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%" stop-color="#ffffff" />
+                            <stop offset="58%" stop-color="#f4f6f8" />
+                            <stop offset="100%" stop-color="#d3d9df" />
+                          </linearGradient>
+                          <linearGradient id="syncCableHead" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%" stop-color="#ffffff" />
+                            <stop offset="60%" stop-color="#f3f6f8" />
+                            <stop offset="100%" stop-color="#d8dee3" />
+                          </linearGradient>
+                          <linearGradient id="syncCableMetal" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%" stop-color="#e8edf1" />
+                            <stop offset="48%" stop-color="#bec7cf" />
+                            <stop offset="100%" stop-color="#8e99a4" />
+                          </linearGradient>
+                          <linearGradient id="syncCablePins" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%" stop-color="#fcfdfe" />
+                            <stop offset="100%" stop-color="#9aa4ae" />
+                          </linearGradient>
+                        </defs>
+                        <path class="sync-cable-wire" d="M40 45 C40 57, 40 69, 40 89" fill="none" />
+                        <rect class="sync-cable-wire-shadow" x="37.5" y="45" width="5" height="44" rx="2.5" />
+                        <rect class="sync-cable-head-shadow" x="16" y="18.5" width="48" height="28" rx="8" />
+                        <rect class="sync-cable-head" x="14" y="17" width="52" height="28" rx="8" />
+                        <rect class="sync-cable-head-highlight" x="18" y="20" width="44" height="8" rx="4" />
+                        <rect class="sync-cable-head-side sync-cable-head-side-left" x="14" y="21" width="4" height="18" rx="2" />
+                        <rect class="sync-cable-head-side sync-cable-head-side-right" x="62" y="21" width="4" height="18" rx="2" />
+                        <rect class="sync-cable-port" x="23" y="26" width="34" height="11" rx="3.2" />
+                        <rect class="sync-cable-pin-bed" x="22" y="11.5" width="36" height="8.5" rx="2.8" />
+                        <rect class="sync-cable-metal-cap" x="24" y="10" width="32" height="5.5" rx="1.8" />
+                        <g class="sync-cable-pins">
+                          <rect x="25" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="29" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="33" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="37" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="41" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="45" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="49" y="13.7" width="2" height="5" rx="1" />
+                          <rect x="53" y="13.7" width="2" height="5" rx="1" />
+                        </g>
+                      </svg>
+                    </div>
+                    <div class="sync-icon sync-icon-ready">
+                      <div class="sync-ready-device">
+                        <span class="sync-ready-screen"></span>
+                        <span class="sync-ready-wheel"></span>
+                      </div>
+                      <span class="sync-ready-link"></span>
+                    </div>
+                    <div class="sync-icon sync-icon-spinner">
+                      <div class="sync-spinner-ring"></div>
+                      <div class="sync-spinner-ring sync-spinner-ring-reverse"></div>
+                    </div>
+                    <div class="sync-icon sync-icon-check">
+                      <span class="sync-check-mark"></span>
+                    </div>
+                    <div class="sync-icon sync-icon-error">
+                      <span class="sync-error-mark"></span>
+                    </div>
+                  </div>
+                  <p id="sync-headline" class="sync-headline">Connect iPod to sync</p>
+                  <p id="sync-subheadline" class="sync-subheadline hidden"></p>
+                  <div id="sync-action" class="sync-action hidden" aria-hidden="true">
+                    <span id="sync-action-label">Sync Now</span>
+                  </div>
+                </div>
+              </section>
+
+              <section id="photo-viewer-panel" class="screen-state photo-viewer-panel hidden" aria-label="Photo viewer">
+                <div class="screen-status-bar photo-viewer-status-bar">
+                  <span class="screen-status-title">Photos</span>
+                  <div class="battery-indicator battery-indicator-light" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <div class="photo-viewer-stage">
+                  <div class="photo-viewer-frame">
+                    <img id="photo-viewer-image" class="photo-viewer-image hidden" alt="Selected photo">
+                    <div id="photo-viewer-placeholder" class="photo-viewer-placeholder" aria-hidden="true">No Photo</div>
+                  </div>
+                  <p id="photo-viewer-title" class="photo-viewer-title"></p>
+                  <p id="photo-viewer-counter" class="photo-viewer-counter"></p>
+                </div>
+              </section>
+
+              <section id="game-panel" class="screen-state game-panel hidden" aria-label="Games">
+                <div class="screen-status-bar game-status-bar">
+                  <span id="game-status-title" class="screen-status-title">Games</span>
+                  <div class="battery-indicator" aria-hidden="true">
+                    <span class="battery-shell">
+                      <span class="battery-level"></span>
+                    </span>
+                    <span class="battery-cap"></span>
+                  </div>
+                </div>
+                <div id="game-screen-body" class="game-screen-body" data-game-id="" data-game-phase="intro">
+                  <div id="game-hud" class="game-hud hidden">
+                    <span id="game-score-label" class="game-hud-value"></span>
+                    <span id="game-round-label" class="game-hud-value"></span>
+                  </div>
+                  <div class="game-stage">
+                    <canvas id="game-canvas" class="game-canvas hidden" width="320" height="190" aria-hidden="true"></canvas>
+                    <div id="game-message-screen" class="game-message-screen">
+                      <p id="game-title" class="game-title"></p>
+                      <p id="game-subtitle" class="game-subtitle"></p>
+                      <p id="game-instructions" class="game-instructions"></p>
+                    </div>
+                    <div id="music-quiz-panel" class="music-quiz-panel hidden">
+                      <p id="music-quiz-prompt-label" class="music-quiz-prompt-label"></p>
+                      <p id="music-quiz-prompt" class="music-quiz-prompt"></p>
+                      <ul id="music-quiz-choices" class="music-quiz-choices" aria-label="Music quiz choices"></ul>
+                    </div>
+                  </div>
+                  <p id="game-footer" class="game-footer"></p>
+                </div>
+              </section>
+
               <section id="now-playing-panel" class="screen-state screen-now-playing hidden" aria-label="Now playing preview">
                 <div class="now-playing-header">
                   <span>Now Playing</span>
@@ -315,7 +450,7 @@
             </section>
           </div>
           <form id="upload-form" class="fallback-upload">
-            <input id="file-input" class="visually-hidden" type="file" name="file" accept=".mp3,.m4a,.aac,.wav,.aiff,.flac,.ogg,.mp4,.m4v,.mov,.avi,.mkv,audio/*,video/*">
+            <input id="file-input" class="visually-hidden" type="file" name="file" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.mp3,.m4a,.aac,.wav,.aiff,.flac,.ogg,.mp4,.m4v,.mov,.avi,.mkv,image/*,audio/*,video/*">
             <button id="upload-button" type="submit" form="upload-form" class="visually-hidden">Upload File</button>
           </form>
 

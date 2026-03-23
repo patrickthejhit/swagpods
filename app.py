@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
+import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 from shutil import copy2
@@ -24,6 +28,11 @@ ALLOWED_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 TRACKED_UPLOADS: dict[str, dict[str, str | dict[str, str] | float]] = {}
 FFMPEG_BIN = "ffmpeg"
 FFPROBE_BIN = "ffprobe"
+SCRIPT_DIR = BASE_DIR / "scripts"
+IPOD_CONFIG_SCRIPT = SCRIPT_DIR / "ipod_project_config.sh"
+IPOD_STAGE_SCRIPT = SCRIPT_DIR / "ipod_stage_all.sh"
+DEFAULT_IPOD_TARGET_VOLUME = "/Volumes/4 tb backup"
+DEFAULT_IPOD_PROJECT_ROOT = f"{DEFAULT_IPOD_TARGET_VOLUME}/codex ipod ready 500gb"
 
 AUDIO_FIELD_MAP = {
     "title": ("title", TIT2),
@@ -102,12 +111,248 @@ VIDEO_QUALITY_FACTORS = {
 
 
 app = Flask(__name__)
+SYNC_LOCK = threading.Lock()
+SYNC_PROCESS: subprocess.Popen[str] | None = None
+SYNC_STATE = {
+    "state": "no_device",
+    "headline": "Connect iPod to sync",
+    "subheadline": "",
+    "actionLabel": "",
+    "canStart": False,
+    "busy": False,
+    "sticky": False,
+    "detail": "",
+}
+SYNC_ENV_CACHE = {
+    "timestamp": 0.0,
+    "value": {
+        "deviceDetected": False,
+        "deviceName": "",
+        "bridgeReady": False,
+        "targetVolumeReady": False,
+        "pipelineScriptReady": False,
+        "mediaCount": 0,
+        "targetVolume": DEFAULT_IPOD_TARGET_VOLUME,
+        "projectRoot": DEFAULT_IPOD_PROJECT_ROOT,
+    },
+}
 
 
 def ensure_directories() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_ipod_sync_config() -> dict[str, str]:
+    config = {
+        "targetVolume": os.environ.get("IPOD_TARGET_VOLUME", DEFAULT_IPOD_TARGET_VOLUME),
+        "projectRoot": os.environ.get("IPOD_PROJECT_ROOT", DEFAULT_IPOD_PROJECT_ROOT),
+        "pipelineLog": os.environ.get("IPOD_PIPELINE_LOG", str(Path.home() / ".codex" / "ipod-supervisor" / "stage_pipeline.log")),
+    }
+
+    if not IPOD_CONFIG_SCRIPT.exists():
+        return config
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-lc",
+            (
+                f"source {shlex.quote(str(IPOD_CONFIG_SCRIPT))} >/dev/null 2>&1; "
+                'printf "targetVolume=%s\\nprojectRoot=%s\\npipelineLog=%s\\n" '
+                '"${IPOD_TARGET_VOLUME:-}" "${IPOD_PROJECT_ROOT:-}" "${IPOD_PIPELINE_LOG:-}"'
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return config
+
+    for line in (result.stdout or "").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if value.strip():
+            config[key] = value.strip()
+
+    return config
+
+
+def count_syncable_media() -> int:
+    return len(list(EXPORT_DIR.glob("*.mp3"))) + len(list(EXPORT_DIR.glob("*.mp4")))
+
+
+def detect_connected_ipod_device() -> tuple[bool, str]:
+    if sys.platform != "darwin":
+        return False, ""
+
+    usb_result = subprocess.run(
+        ["system_profiler", "SPUSBDataType", "-detailLevel", "mini"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    usb_output = usb_result.stdout or ""
+    match = re.search(r"^\s*([^\n]*iPod[^\n]*):\s*$", usb_output, flags=re.IGNORECASE | re.MULTILINE)
+    if match:
+        return True, match.group(1).strip()
+
+    volumes_dir = Path("/Volumes")
+    if volumes_dir.exists():
+        for volume in volumes_dir.iterdir():
+            if "ipod" in volume.name.lower():
+                return True, volume.name
+
+    return False, ""
+
+
+def get_sync_environment(force: bool = False) -> dict[str, object]:
+    now = time.monotonic()
+    if not force and (now - float(SYNC_ENV_CACHE["timestamp"])) < 1.5:
+        return dict(SYNC_ENV_CACHE["value"])
+
+    config = get_ipod_sync_config()
+    device_detected, device_name = detect_connected_ipod_device()
+    target_volume = Path(config["targetVolume"])
+    project_root = Path(config["projectRoot"])
+    pipeline_ready = IPOD_STAGE_SCRIPT.exists()
+    env = {
+        "deviceDetected": device_detected,
+        "deviceName": device_name or "iPod",
+        "bridgeReady": pipeline_ready and target_volume.exists(),
+        "targetVolumeReady": target_volume.exists(),
+        "pipelineScriptReady": pipeline_ready,
+        "mediaCount": count_syncable_media(),
+        "targetVolume": str(target_volume),
+        "projectRoot": str(project_root),
+        "pipelineLog": str(config["pipelineLog"]),
+    }
+    SYNC_ENV_CACHE["timestamp"] = now
+    SYNC_ENV_CACHE["value"] = dict(env)
+    return env
+
+
+def set_sync_state(
+    state: str,
+    headline: str,
+    subheadline: str = "",
+    *,
+    action_label: str = "",
+    can_start: bool = False,
+    busy: bool = False,
+    sticky: bool = False,
+    detail: str = "",
+) -> None:
+    SYNC_STATE.update(
+        {
+            "state": state,
+            "headline": headline,
+            "subheadline": subheadline,
+            "actionLabel": action_label,
+            "canStart": can_start,
+            "busy": busy,
+            "sticky": sticky,
+            "detail": detail,
+        }
+    )
+
+
+def launch_ipod_sync_pipeline() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        ["/bin/bash", str(IPOD_STAGE_SCRIPT)],
+        cwd=BASE_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        text=True,
+    )
+
+
+def get_sync_payload(force_env: bool = False) -> dict[str, object]:
+    global SYNC_PROCESS
+
+    env = get_sync_environment(force=force_env)
+    with SYNC_LOCK:
+        if SYNC_PROCESS is not None:
+            returncode = SYNC_PROCESS.poll()
+            if returncode is None:
+                if not bool(env["deviceDetected"]):
+                    try:
+                        SYNC_PROCESS.terminate()
+                    except OSError:
+                        pass
+                    SYNC_PROCESS = None
+                    set_sync_state(
+                        "error",
+                        "Sync failed",
+                        "iPod disconnected",
+                        action_label="Retry Sync",
+                        can_start=False,
+                        sticky=True,
+                        detail="disconnected",
+                    )
+                else:
+                    set_sync_state(
+                        "syncing",
+                        "Syncing...",
+                        "Please wait...",
+                        can_start=False,
+                        busy=True,
+                        sticky=True,
+                    )
+            else:
+                SYNC_PROCESS = None
+                if returncode == 0:
+                    set_sync_state(
+                        "success",
+                        "Synced",
+                        "OK to Disconnect",
+                        can_start=False,
+                        sticky=True,
+                    )
+                else:
+                    set_sync_state(
+                        "error",
+                        "Sync failed",
+                        "Please try again",
+                        action_label="Retry Sync" if bool(env["deviceDetected"]) else "",
+                        can_start=bool(env["deviceDetected"]),
+                        sticky=True,
+                    )
+        elif SYNC_STATE["state"] == "success":
+            if not bool(env["deviceDetected"]):
+                set_sync_state("no_device", "Connect iPod to sync")
+        elif SYNC_STATE["state"] == "error":
+            if not bool(env["deviceDetected"]) and SYNC_STATE.get("detail") != "disconnected":
+                set_sync_state("no_device", "Connect iPod to sync")
+        else:
+            if not bool(env["deviceDetected"]):
+                set_sync_state("no_device", "Connect iPod to sync")
+            else:
+                media_count = int(env["mediaCount"])
+                media_text = "Library ready" if media_count == 0 else f"{media_count} item{'s' if media_count != 1 else ''} ready"
+                set_sync_state(
+                    "ready",
+                    "iPod Connected",
+                    media_text,
+                    action_label="Sync Now",
+                    can_start=True,
+                )
+
+        return {
+            "state": SYNC_STATE["state"],
+            "headline": SYNC_STATE["headline"],
+            "subheadline": SYNC_STATE["subheadline"],
+            "actionLabel": SYNC_STATE["actionLabel"],
+            "canStart": SYNC_STATE["canStart"],
+            "busy": SYNC_STATE["busy"],
+            "deviceDetected": env["deviceDetected"],
+            "deviceName": env["deviceName"],
+            "mediaCount": env["mediaCount"],
+        }
 
 
 def allowed_file(filename: str) -> bool:
@@ -685,6 +930,65 @@ def get_library():
         for file_path in sorted(EXPORT_DIR.glob("*.mp3"), key=lambda path: path.stat().st_mtime)
     ]
     return jsonify({"songs": songs})
+
+
+@app.get("/api/sync/status")
+def get_sync_status():
+    ensure_directories()
+    return jsonify(get_sync_payload(force_env=True))
+
+
+@app.post("/api/sync/start")
+def start_sync():
+    global SYNC_PROCESS
+
+    ensure_directories()
+    env = get_sync_environment(force=True)
+
+    with SYNC_LOCK:
+        if SYNC_PROCESS is not None and SYNC_PROCESS.poll() is None:
+            set_sync_state(
+                "syncing",
+                "Syncing...",
+                "Please wait...",
+                busy=True,
+                sticky=True,
+            )
+
+        elif not bool(env["deviceDetected"]):
+            set_sync_state("no_device", "Connect iPod to sync")
+
+        elif not bool(env["bridgeReady"]):
+            set_sync_state(
+                "error",
+                "Sync failed",
+                "Please try again",
+                action_label="Retry Sync",
+                can_start=True,
+                sticky=True,
+            )
+
+        else:
+            try:
+                SYNC_PROCESS = launch_ipod_sync_pipeline()
+                set_sync_state(
+                    "syncing",
+                    "Syncing...",
+                    "Please wait...",
+                    busy=True,
+                    sticky=True,
+                )
+            except OSError:
+                set_sync_state(
+                    "error",
+                    "Sync failed",
+                    "Please try again",
+                    action_label="Retry Sync",
+                    can_start=True,
+                    sticky=True,
+                )
+
+    return jsonify(get_sync_payload(force_env=True))
 
 
 @app.get("/exports/cleaned/<path:filename>")

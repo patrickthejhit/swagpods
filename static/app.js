@@ -35,12 +35,40 @@ const convertResultMeta = document.getElementById("convert-result-meta");
 const convertDownloadButton = document.getElementById("convert-download-button");
 const screenControlHint = document.getElementById("screen-control-hint");
 const libraryPanel = document.getElementById("library-panel");
+const syncPanel = document.getElementById("sync-panel");
+const photoViewerPanel = document.getElementById("photo-viewer-panel");
+const gamePanel = document.getElementById("game-panel");
 const customizePanelScreen = document.getElementById("customize-panel-screen");
 const libraryLabel = document.getElementById("library-label");
 const libraryTitle = document.getElementById("library-title");
 const librarySummary = document.getElementById("library-summary");
 const librarySelectionBar = document.getElementById("library-selection-bar");
 const libraryList = document.getElementById("library-list");
+const syncScreenBody = document.getElementById("sync-screen-body");
+const syncIconSet = document.getElementById("sync-icon-set");
+const syncHeadline = document.getElementById("sync-headline");
+const syncSubheadline = document.getElementById("sync-subheadline");
+const syncAction = document.getElementById("sync-action");
+const syncActionLabel = document.getElementById("sync-action-label");
+const photoViewerImage = document.getElementById("photo-viewer-image");
+const photoViewerPlaceholder = document.getElementById("photo-viewer-placeholder");
+const photoViewerTitle = document.getElementById("photo-viewer-title");
+const photoViewerCounter = document.getElementById("photo-viewer-counter");
+const gameStatusTitle = document.getElementById("game-status-title");
+const gameScreenBody = document.getElementById("game-screen-body");
+const gameHud = document.getElementById("game-hud");
+const gameScoreLabel = document.getElementById("game-score-label");
+const gameRoundLabel = document.getElementById("game-round-label");
+const gameCanvas = document.getElementById("game-canvas");
+const gameMessageScreen = document.getElementById("game-message-screen");
+const gameTitle = document.getElementById("game-title");
+const gameSubtitle = document.getElementById("game-subtitle");
+const gameInstructions = document.getElementById("game-instructions");
+const musicQuizPanel = document.getElementById("music-quiz-panel");
+const musicQuizPromptLabel = document.getElementById("music-quiz-prompt-label");
+const musicQuizPrompt = document.getElementById("music-quiz-prompt");
+const musicQuizChoices = document.getElementById("music-quiz-choices");
+const gameFooter = document.getElementById("game-footer");
 const nowPlayingPanel = document.getElementById("now-playing-panel");
 const playerTitle = document.getElementById("player-title");
 const playerArtist = document.getElementById("player-artist");
@@ -63,7 +91,26 @@ const VIDEO_METADATA_FIELDS = {
   episodeNumber: "video-episode-number",
   artist: "video-artist",
 };
-const SUPPORTED_EXTENSIONS = [".mp3", ".m4a", ".aac", ".wav", ".aiff", ".flac", ".ogg", ".mp4", ".m4v", ".mov", ".avi", ".mkv"];
+const MEDIA_EXTENSIONS = [".mp3", ".m4a", ".aac", ".wav", ".aiff", ".flac", ".ogg", ".mp4", ".m4v", ".mov", ".avi", ".mkv"];
+const PHOTO_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".gif"];
+const PHOTO_LIBRARY_SESSION_KEY = "swagpods.photoLibrary.v1";
+const BRICK_CANVAS_WIDTH = 320;
+const BRICK_CANVAS_HEIGHT = 190;
+const BRICK_ROWS = 4;
+const BRICK_COLUMNS = 6;
+const BRICK_PADDING = 6;
+const BRICK_TOP_OFFSET = 22;
+const BRICK_SIDE_MARGIN = 10;
+const MUSIC_QUIZ_ROUNDS = 5;
+const HAPTIC_PATTERNS = {
+  tick: { pattern: 6, cooldown: 26 },
+  navigate: { pattern: 8, cooldown: 38 },
+  back: { pattern: 14, cooldown: 68 },
+  transport: { pattern: 12, cooldown: 58 },
+  select: { pattern: 18, cooldown: 82 },
+  confirm: { pattern: [12, 22, 16], cooldown: 140 },
+  success: { pattern: [14, 28, 18, 32, 24], cooldown: 260 },
+};
 const DEVICE_PRESETS = {
   "ipod-classic-5g": {
     label: "iPod Classic 5th Gen",
@@ -99,11 +146,20 @@ const DEVICE_PRESETS = {
 const VISIBLE_LIBRARY_ITEMS = 6;
 const LIBRARY_ROW_HEIGHT = 35;
 const LIBRARY_ROW_GAP = 0;
+const GAME_LIBRARY_ITEMS = [
+  { id: "brick", title: "Brick", meta: "Arcade", implemented: true },
+  { id: "music-quiz", title: "Music Quiz", meta: "Library", implemented: true },
+  { id: "parachute", title: "Parachute", meta: "Soon", implemented: false },
+  { id: "solitaire", title: "Solitaire", meta: "Soon", implemented: false },
+];
 let uploadToken = "";
 let isExporting = false;
 let currentSong = null;
 let lastConvertedSong = null;
 let librarySongs = [];
+let libraryPhotos = [];
+let currentPhotoId = "";
+let currentGame = null;
 let highlightedSongId = "";
 let screenMode = "library";
 let pendingUploads = [];
@@ -113,6 +169,71 @@ let previousScreenMode = "library";
 let wheelDrag = null;
 let libraryPath = ["main"];
 let screenScrollAccumulator = 0;
+let syncPollTimer = null;
+let brickLoopTimer = null;
+let syncViewState = {
+  state: "no_device",
+  headline: "Connect iPod to sync",
+  subheadline: "",
+  actionLabel: "",
+  canStart: false,
+  busy: false,
+};
+
+const haptics = (() => {
+  const lastFireTimes = new Map();
+
+  function isSupported() {
+    return (
+      typeof window !== "undefined" &&
+      typeof navigator !== "undefined" &&
+      typeof navigator.vibrate === "function" &&
+      navigator.maxTouchPoints > 0 &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches
+    );
+  }
+
+  function fire(kind) {
+    const config = HAPTIC_PATTERNS[kind];
+    if (!config || !isSupported()) {
+      return;
+    }
+
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const lastFiredAt = lastFireTimes.get(kind) || 0;
+    if (now - lastFiredAt < config.cooldown) {
+      return;
+    }
+
+    lastFireTimes.set(kind, now);
+    navigator.vibrate(config.pattern);
+  }
+
+  return {
+    tick() {
+      fire("tick");
+    },
+    navigate() {
+      fire("navigate");
+    },
+    back() {
+      fire("back");
+    },
+    transport() {
+      fire("transport");
+    },
+    select() {
+      fire("select");
+    },
+    confirm() {
+      fire("confirm");
+    },
+    success() {
+      fire("success");
+    },
+  };
+})();
 
 const FACEPLATE_THEMES = {
   classic: {
@@ -414,6 +535,40 @@ function createSongRecord(song) {
   };
 }
 
+function createPhotoRecord(photo) {
+  return {
+    id: photo.id || `${photo.fileName}-${photo.importedAt || Date.now()}`,
+    fileName: photo.fileName,
+    previewUrl: photo.previewUrl,
+    importedAt: photo.importedAt || Date.now(),
+  };
+}
+
+function createEmptyGameState() {
+  return {
+    id: "",
+    phase: "intro",
+    title: "Games",
+    subtitle: "",
+    instructions: "",
+    footer: "",
+    score: 0,
+    roundLabel: "",
+    showHud: false,
+    brick: null,
+    promptLabel: "",
+    prompt: "",
+    choices: [],
+    selectedChoice: 0,
+    totalRounds: 0,
+    roundIndex: 0,
+    correctChoice: 0,
+    lastCorrectLabel: "",
+    resultText: "",
+    implemented: true,
+  };
+}
+
 function hasPendingUploads() {
   return pendingUploads.length > 0;
 }
@@ -432,7 +587,12 @@ function isVideoUpload(upload) {
 
 function isSupportedFile(file) {
   const lowerName = file.name.toLowerCase();
-  return SUPPORTED_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+  return MEDIA_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+}
+
+function isPhotoFile(file) {
+  const lowerName = file.name.toLowerCase();
+  return file.type.startsWith("image/") || PHOTO_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
 }
 
 function getVideoMetadataFields() {
@@ -485,8 +645,25 @@ function getDisplaySongs() {
   return librarySongs.slice().reverse();
 }
 
+function getDisplayPhotos() {
+  return libraryPhotos.slice().sort((left, right) => right.importedAt - left.importedAt);
+}
+
 function getSongsByCategory(category) {
   return getDisplaySongs().filter((song) => (song.category || "Music") === category);
+}
+
+function getQuizSongs() {
+  return getDisplaySongs().filter((song) => (song.category || "Music") === "Music");
+}
+
+function shuffleArray(values) {
+  const copy = values.slice();
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+  }
+  return copy;
 }
 
 function getLibraryViewKey() {
@@ -495,15 +672,19 @@ function getLibraryViewKey() {
 
 function getLibraryState() {
   const displaySongs = getDisplaySongs();
+  const displayPhotos = getDisplayPhotos();
   const musicSongs = getSongsByCategory("Music");
   const podcastSongs = getSongsByCategory("Podcast");
   const songCount = displaySongs.length;
+  const photoCount = displayPhotos.length;
   const musicSummary =
     musicSongs.length === 0 ? "No songs yet." : `${musicSongs.length} song${musicSongs.length === 1 ? "" : "s"}`;
   const podcastSummary =
     podcastSongs.length === 0
       ? "No podcasts yet."
       : `${podcastSongs.length} podcast${podcastSongs.length === 1 ? "" : "s"}`;
+  const photoSummary =
+    photoCount === 0 ? "No photos yet." : `${photoCount} photo${photoCount === 1 ? "" : "s"}`;
 
   switch (getLibraryViewKey()) {
     case "music":
@@ -543,8 +724,25 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Photos",
-        summary: "No photo features yet.",
-        items: [],
+        summary: photoCount === 0 ? "No photos added yet." : `${photoCount} photo${photoCount === 1 ? "" : "s"} available`,
+        items: displayPhotos.map((photo) => ({
+          type: "photo",
+          id: photo.id,
+          photo,
+        })),
+      };
+    case "games":
+      return {
+        label: "Main Menu",
+        title: "Games",
+        summary: "Choose a game.",
+        items: GAME_LIBRARY_ITEMS.map((game) => ({
+          type: "game",
+          id: game.id,
+          title: game.title,
+          meta: game.meta,
+          implemented: game.implemented,
+        })),
       };
     case "podcasts":
       return {
@@ -679,6 +877,24 @@ function getLibraryState() {
           },
           {
             type: "menu",
+            id: "photos",
+            title: "Photos",
+            meta: photoSummary,
+          },
+          {
+            type: "menu",
+            id: "games",
+            title: "Games",
+            meta: "Built-in",
+          },
+          {
+            type: "action",
+            id: "sync",
+            title: "Sync",
+            meta: "Utility",
+          },
+          {
+            type: "menu",
             id: "settings",
             title: "Settings",
             meta: "Device Options",
@@ -698,7 +914,7 @@ function clampSelectedIndex() {
   selectedIndex = Math.max(0, Math.min(selectedIndex, libraryState.items.length - 1));
 }
 
-function moveLibrarySelection(step) {
+function moveLibrarySelection(step, source = "generic") {
   const libraryState = getLibraryState();
   if (screenMode !== "library" || libraryState.items.length === 0 || step === 0) {
     return;
@@ -712,6 +928,10 @@ function moveLibrarySelection(step) {
   selectedIndex = nextIndex;
   const selectedItem = libraryState.items[selectedIndex];
   highlightedSongId = selectedItem?.type === "song" ? selectedItem.id : "";
+  if (source === "wheel") {
+    haptics.tick();
+  }
+  haptics.navigate();
   syncUi();
 }
 
@@ -761,6 +981,51 @@ function syncActiveThemeButtons(group, value) {
   });
 }
 
+function normalizeSyncViewState(payload = {}) {
+  return {
+    state: payload.state || "no_device",
+    headline: payload.headline || "Connect iPod to sync",
+    subheadline: payload.subheadline || "",
+    actionLabel: payload.actionLabel || "",
+    canStart: Boolean(payload.canStart),
+    busy: Boolean(payload.busy),
+  };
+}
+
+function stopSyncPolling() {
+  if (syncPollTimer) {
+    window.clearInterval(syncPollTimer);
+    syncPollTimer = null;
+  }
+}
+
+async function fetchSyncPayload(url, options = {}) {
+  const response = await fetch(url, options);
+  const responseText = await response.text();
+
+  try {
+    return responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    return {
+      state: "no_device",
+      headline: "Connect iPod to sync",
+      subheadline: "",
+      actionLabel: "",
+      canStart: false,
+      busy: false,
+    };
+  }
+}
+
+function startSyncPolling() {
+  stopSyncPolling();
+  syncPollTimer = window.setInterval(() => {
+    if (screenMode === "sync") {
+      void refreshSyncStatus();
+    }
+  }, 2000);
+}
+
 function setScreenMode(nextMode) {
   if (nextMode !== "library") {
     previousScreenMode = nextMode;
@@ -769,6 +1034,9 @@ function setScreenMode(nextMode) {
   idleState.classList.toggle("hidden", nextMode !== "idle");
   editorPanel.classList.toggle("hidden", nextMode !== "edit");
   libraryPanel.classList.toggle("hidden", nextMode !== "library");
+  syncPanel.classList.toggle("hidden", nextMode !== "sync");
+  photoViewerPanel.classList.toggle("hidden", nextMode !== "photo-viewer");
+  gamePanel.classList.toggle("hidden", nextMode !== "game");
   customizePanelScreen.classList.toggle("hidden", nextMode !== "customize");
   nowPlayingPanel.classList.toggle("hidden", nextMode !== "now-playing");
 }
@@ -778,23 +1046,42 @@ function syncSelectButton() {
   const hasLibrarySelection = libraryState.items.length > 0;
   const shouldDisable =
     isExporting ||
+    (screenMode === "sync" && (!syncViewState.canStart || syncViewState.busy)) ||
     screenMode === "idle" ||
+    screenMode === "photo-viewer" ||
     screenMode === "now-playing" ||
     screenMode === "customize" ||
     (screenMode === "edit" && !hasPendingUploads()) ||
     (screenMode === "library" && !hasLibrarySelection);
 
   selectButton.disabled = shouldDisable;
-  selectButton.classList.toggle("is-loading", isExporting);
 }
 
 function syncPlaybackButton() {
-  playbackButton.disabled = !currentSong;
+  playbackButton.disabled = screenMode === "sync" || screenMode === "photo-viewer" || screenMode === "game" || !currentSong;
   playbackButton.classList.toggle("is-playing", Boolean(currentSong) && !previewAudio.paused);
 }
 
 function syncWheelButtons() {
   menuButton.disabled = false;
+  if (screenMode === "sync") {
+    rewindButton.disabled = true;
+    forwardButton.disabled = true;
+    return;
+  }
+
+  if (screenMode === "photo-viewer") {
+    rewindButton.disabled = libraryPhotos.length < 2;
+    forwardButton.disabled = libraryPhotos.length < 2;
+    return;
+  }
+
+  if (screenMode === "game") {
+    rewindButton.disabled = false;
+    forwardButton.disabled = false;
+    return;
+  }
+
   if (screenMode === "edit" && Boolean(getActiveUpload())) {
     rewindButton.disabled = false;
     forwardButton.disabled = false;
@@ -919,6 +1206,597 @@ function renderConvertScreen() {
   screenControlHint.textContent = "Use wheel left/right to change Optimize For.";
 }
 
+function renderSyncScreen() {
+  syncScreenBody.dataset.syncState = syncViewState.state;
+  syncIconSet.dataset.syncState = syncViewState.state;
+  syncHeadline.textContent = syncViewState.headline;
+  syncSubheadline.textContent = syncViewState.subheadline;
+  syncSubheadline.classList.toggle("hidden", !syncViewState.subheadline);
+  syncActionLabel.textContent = syncViewState.actionLabel || "Sync Now";
+  syncAction.classList.toggle("hidden", !syncViewState.canStart);
+  syncAction.setAttribute("aria-hidden", syncViewState.canStart ? "false" : "true");
+}
+
+function createBrickBricks() {
+  const brickWidth = (BRICK_CANVAS_WIDTH - BRICK_SIDE_MARGIN * 2 - BRICK_PADDING * (BRICK_COLUMNS - 1)) / BRICK_COLUMNS;
+  const brickHeight = 14;
+  const bricks = [];
+
+  for (let rowIndex = 0; rowIndex < BRICK_ROWS; rowIndex += 1) {
+    for (let columnIndex = 0; columnIndex < BRICK_COLUMNS; columnIndex += 1) {
+      bricks.push({
+        x: BRICK_SIDE_MARGIN + columnIndex * (brickWidth + BRICK_PADDING),
+        y: BRICK_TOP_OFFSET + rowIndex * (brickHeight + BRICK_PADDING),
+        width: brickWidth,
+        height: brickHeight,
+        alive: true,
+      });
+    }
+  }
+
+  return bricks;
+}
+
+function createBrickSession() {
+  return {
+    paddleX: BRICK_CANVAS_WIDTH / 2 - 34,
+    paddleWidth: 68,
+    paddleHeight: 8,
+    ballX: BRICK_CANVAS_WIDTH / 2,
+    ballY: BRICK_CANVAS_HEIGHT - 36,
+    ballRadius: 5,
+    ballVX: 2.2,
+    ballVY: -2.8,
+    bricks: createBrickBricks(),
+  };
+}
+
+function stopBrickLoop() {
+  if (brickLoopTimer) {
+    window.clearInterval(brickLoopTimer);
+    brickLoopTimer = null;
+  }
+}
+
+function buildMusicQuizQuestion() {
+  const quizSongs = shuffleArray(getQuizSongs());
+  if (quizSongs.length < 2) {
+    return null;
+  }
+
+  const correctSong = quizSongs[0];
+  const hasArtistChoices = quizSongs.some((song) => song.id !== correctSong.id && (song.artist || "").trim());
+  const useArtistPrompt = Boolean((correctSong.artist || "").trim()) && hasArtistChoices;
+
+  const promptLabel = useArtistPrompt ? "Song by" : "Pick this title";
+  const prompt = useArtistPrompt ? correctSong.artist : (correctSong.title || correctSong.fileName);
+  const answerLabel = useArtistPrompt
+    ? (correctSong.title || correctSong.fileName)
+    : (correctSong.artist || correctSong.album || correctSong.fileName);
+  const distractors = quizSongs
+    .slice(1)
+    .map((song) =>
+      useArtistPrompt ? (song.title || song.fileName) : (song.artist || song.album || song.fileName)
+    )
+    .filter((label) => label && label !== answerLabel);
+
+  const choicePool = shuffleArray([answerLabel, ...distractors]).slice(0, Math.min(4, quizSongs.length));
+  if (!choicePool.includes(answerLabel)) {
+    choicePool[choicePool.length - 1] = answerLabel;
+  }
+
+  const choices = shuffleArray(choicePool).map((label, index) => ({
+    id: `${correctSong.id}-${index}-${label}`,
+    label,
+    correct: label === answerLabel,
+  }));
+
+  return {
+    promptLabel,
+    prompt,
+    choices,
+    correctChoice: choices.findIndex((choice) => choice.correct),
+    answerLabel,
+  };
+}
+
+function createBrickGameState() {
+  return {
+    ...createEmptyGameState(),
+    id: "brick",
+    phase: "intro",
+    title: "Brick",
+    subtitle: "Classic block breaker",
+    instructions: "Press center to start",
+    footer: "Left/Right move paddle",
+    score: 0,
+    brick: createBrickSession(),
+    showHud: true,
+  };
+}
+
+function createMusicQuizGameState() {
+  if (getQuizSongs().length < 2) {
+    return {
+      ...createEmptyGameState(),
+      id: "music-quiz",
+      phase: "empty",
+      title: "Music Quiz",
+      subtitle: "No music for quiz",
+      instructions: "Add music to play",
+      footer: "Import songs, then come back",
+      showHud: false,
+    };
+  }
+
+  return {
+    ...createEmptyGameState(),
+    id: "music-quiz",
+    phase: "intro",
+    title: "Music Quiz",
+    subtitle: "Test your library",
+    instructions: "Press center to start",
+    footer: "Left/Right choose answer",
+    totalRounds: MUSIC_QUIZ_ROUNDS,
+    showHud: true,
+  };
+}
+
+function createUnavailableGameState(gameId) {
+  const game = GAME_LIBRARY_ITEMS.find((item) => item.id === gameId);
+  return {
+    ...createEmptyGameState(),
+    id: gameId,
+    phase: "unavailable",
+    title: game?.title || "Game",
+    subtitle: "Coming Soon",
+    instructions: "Press Menu to return",
+    footer: "More games are on the way",
+    implemented: false,
+  };
+}
+
+function getGameMenuIndex(gameId) {
+  return GAME_LIBRARY_ITEMS.findIndex((item) => item.id === gameId);
+}
+
+function renderBrickCanvas() {
+  if (!gameCanvas || !currentGame || currentGame.id !== "brick" || !currentGame.brick) {
+    return;
+  }
+
+  const context = gameCanvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+
+  const { brick } = currentGame;
+  context.clearRect(0, 0, BRICK_CANVAS_WIDTH, BRICK_CANVAS_HEIGHT);
+  context.fillStyle = "#071014";
+  context.fillRect(0, 0, BRICK_CANVAS_WIDTH, BRICK_CANVAS_HEIGHT);
+
+  context.strokeStyle = "rgba(193, 234, 203, 0.24)";
+  context.lineWidth = 1;
+  context.strokeRect(0.5, 0.5, BRICK_CANVAS_WIDTH - 1, BRICK_CANVAS_HEIGHT - 1);
+
+  brick.bricks.forEach((block, index) => {
+    if (!block.alive) {
+      return;
+    }
+    const shade = 210 - (index % BRICK_COLUMNS) * 12;
+    context.fillStyle = `rgb(${shade}, ${Math.max(165, shade - 24)}, ${Math.max(140, shade - 58)})`;
+    context.fillRect(block.x, block.y, block.width, block.height);
+  });
+
+  context.fillStyle = "#e7f7ed";
+  context.fillRect(brick.paddleX, BRICK_CANVAS_HEIGHT - 20, brick.paddleWidth, brick.paddleHeight);
+
+  context.beginPath();
+  context.arc(brick.ballX, brick.ballY, brick.ballRadius, 0, Math.PI * 2);
+  context.fillStyle = "#fef6cf";
+  context.fill();
+}
+
+function renderGameScreen() {
+  const gameState = currentGame || createEmptyGameState();
+  const isBrick = gameState.id === "brick";
+  const isMusicQuiz = gameState.id === "music-quiz";
+  const isQuizQuestion = isMusicQuiz && gameState.phase === "question";
+  const showCanvas = isBrick;
+  const showMessage = !isQuizQuestion;
+
+  gameScreenBody.dataset.gameId = gameState.id || "";
+  gameScreenBody.dataset.gamePhase = gameState.phase || "intro";
+  gameStatusTitle.textContent = gameState.title || "Games";
+  gameHud.classList.toggle("hidden", !gameState.showHud);
+  gameScoreLabel.textContent = gameState.showHud ? `Score ${String(gameState.score || 0).padStart(3, "0")}` : "";
+  gameRoundLabel.textContent = gameState.roundLabel || "";
+  gameCanvas.classList.toggle("hidden", !showCanvas);
+  gameCanvas.setAttribute("aria-hidden", showCanvas ? "false" : "true");
+  gameMessageScreen.classList.toggle("hidden", !showMessage);
+  musicQuizPanel.classList.toggle("hidden", !isQuizQuestion);
+  gameTitle.textContent = gameState.title || "";
+  gameSubtitle.textContent = gameState.subtitle || "";
+  gameInstructions.textContent = gameState.instructions || "";
+  gameFooter.textContent = gameState.footer || "";
+
+  if (showCanvas) {
+    renderBrickCanvas();
+  } else if (gameCanvas) {
+    const context = gameCanvas.getContext("2d");
+    if (context) {
+      context.clearRect(0, 0, BRICK_CANVAS_WIDTH, BRICK_CANVAS_HEIGHT);
+    }
+  }
+
+  musicQuizChoices.innerHTML = "";
+  if (isQuizQuestion) {
+    musicQuizPromptLabel.textContent = gameState.promptLabel || "";
+    musicQuizPrompt.textContent = gameState.prompt || "";
+
+    gameState.choices.forEach((choice, index) => {
+      const item = document.createElement("li");
+      item.className = `music-quiz-choice${index === gameState.selectedChoice ? " is-selected" : ""}`;
+      item.textContent = choice.label;
+      musicQuizChoices.appendChild(item);
+    });
+  } else {
+    musicQuizPromptLabel.textContent = "";
+    musicQuizPrompt.textContent = "";
+  }
+}
+
+function syncGameHud() {
+  if (!currentGame) {
+    return;
+  }
+  gameScoreLabel.textContent = currentGame.showHud ? `Score ${String(currentGame.score || 0).padStart(3, "0")}` : "";
+  gameRoundLabel.textContent = currentGame.roundLabel || "";
+}
+
+function finishBrickGame(victory) {
+  stopBrickLoop();
+  currentGame.phase = "gameover";
+  currentGame.title = victory ? "You Win" : "Game Over";
+  currentGame.subtitle = `Score ${currentGame.score}`;
+  currentGame.instructions = "Press center to restart";
+  currentGame.footer = "Menu returns to Games";
+  syncUi();
+}
+
+function tickBrickGame() {
+  if (!currentGame || currentGame.id !== "brick" || currentGame.phase !== "playing" || !currentGame.brick) {
+    return;
+  }
+
+  const { brick } = currentGame;
+  brick.ballX += brick.ballVX;
+  brick.ballY += brick.ballVY;
+
+  if (brick.ballX <= brick.ballRadius || brick.ballX >= BRICK_CANVAS_WIDTH - brick.ballRadius) {
+    brick.ballVX *= -1;
+    brick.ballX = Math.max(brick.ballRadius, Math.min(BRICK_CANVAS_WIDTH - brick.ballRadius, brick.ballX));
+  }
+
+  if (brick.ballY <= brick.ballRadius + 2) {
+    brick.ballVY *= -1;
+    brick.ballY = brick.ballRadius + 2;
+  }
+
+  const paddleY = BRICK_CANVAS_HEIGHT - 20;
+  if (
+    brick.ballY + brick.ballRadius >= paddleY &&
+    brick.ballY + brick.ballRadius <= paddleY + brick.paddleHeight &&
+    brick.ballX >= brick.paddleX &&
+    brick.ballX <= brick.paddleX + brick.paddleWidth &&
+    brick.ballVY > 0
+  ) {
+    const relativeHit = (brick.ballX - (brick.paddleX + brick.paddleWidth / 2)) / (brick.paddleWidth / 2);
+    brick.ballVX = relativeHit * 3.2;
+    brick.ballVY = -Math.max(2.4, Math.abs(brick.ballVY));
+  }
+
+  for (const block of brick.bricks) {
+    if (
+      !block.alive ||
+      brick.ballX + brick.ballRadius < block.x ||
+      brick.ballX - brick.ballRadius > block.x + block.width ||
+      brick.ballY + brick.ballRadius < block.y ||
+      brick.ballY - brick.ballRadius > block.y + block.height
+    ) {
+      continue;
+    }
+
+    block.alive = false;
+    brick.ballVY *= -1;
+    currentGame.score += 10;
+    syncGameHud();
+    break;
+  }
+
+  if (brick.bricks.every((block) => !block.alive)) {
+    finishBrickGame(true);
+    return;
+  }
+
+  if (brick.ballY - brick.ballRadius > BRICK_CANVAS_HEIGHT) {
+    finishBrickGame(false);
+    return;
+  }
+
+  renderBrickCanvas();
+}
+
+function startBrickLoop() {
+  stopBrickLoop();
+  brickLoopTimer = window.setInterval(tickBrickGame, 1000 / 30);
+}
+
+function beginBrickGame() {
+  stopBrickLoop();
+  currentGame = createBrickGameState();
+  currentGame.phase = "playing";
+  currentGame.title = "Brick";
+  currentGame.subtitle = "";
+  currentGame.instructions = "";
+  currentGame.footer = "Center pauses";
+  currentGame.roundLabel = "";
+  haptics.confirm();
+  startBrickLoop();
+  syncUi();
+}
+
+function beginMusicQuizRound() {
+  if (!currentGame || currentGame.id !== "music-quiz") {
+    return;
+  }
+
+  const question = buildMusicQuizQuestion();
+  if (!question) {
+    currentGame.phase = "empty";
+    currentGame.title = "Music Quiz";
+    currentGame.subtitle = "No music for quiz";
+    currentGame.instructions = "Add music to play";
+    currentGame.footer = "Import songs, then come back";
+    currentGame.showHud = false;
+    syncUi();
+    return;
+  }
+
+  currentGame.phase = "question";
+  currentGame.title = "Music Quiz";
+  currentGame.subtitle = "";
+  currentGame.instructions = "";
+  currentGame.promptLabel = question.promptLabel;
+  currentGame.prompt = question.prompt;
+  currentGame.choices = question.choices;
+  currentGame.selectedChoice = 0;
+  currentGame.correctChoice = question.correctChoice;
+  currentGame.lastCorrectLabel = question.answerLabel;
+  currentGame.showHud = true;
+  currentGame.roundLabel = `Rnd ${currentGame.roundIndex + 1}/${currentGame.totalRounds}`;
+  currentGame.footer = "Left/Right move • Center choose";
+  syncUi();
+}
+
+function beginMusicQuizGame() {
+  currentGame = createMusicQuizGameState();
+  if (currentGame.phase === "empty") {
+    screenMode = "game";
+    syncUi();
+    return;
+  }
+
+  currentGame.score = 0;
+  currentGame.roundIndex = 0;
+  currentGame.roundLabel = `Rnd 1/${currentGame.totalRounds}`;
+  haptics.confirm();
+  screenMode = "game";
+  beginMusicQuizRound();
+}
+
+function openGame(gameId) {
+  previewAudio.pause();
+  stopSyncPolling();
+  stopBrickLoop();
+
+  if (gameId === "brick") {
+    currentGame = createBrickGameState();
+  } else if (gameId === "music-quiz") {
+    currentGame = createMusicQuizGameState();
+  } else {
+    currentGame = createUnavailableGameState(gameId);
+  }
+
+  screenMode = "game";
+  syncUi();
+}
+
+function moveBrickPaddle(step) {
+  if (!currentGame || currentGame.id !== "brick" || !currentGame.brick) {
+    return;
+  }
+
+  currentGame.brick.paddleX = Math.max(
+    8,
+    Math.min(BRICK_CANVAS_WIDTH - currentGame.brick.paddleWidth - 8, currentGame.brick.paddleX + step * 26)
+  );
+  renderBrickCanvas();
+}
+
+function moveMusicQuizChoice(step) {
+  if (!currentGame || currentGame.id !== "music-quiz" || currentGame.phase !== "question" || currentGame.choices.length === 0) {
+    return;
+  }
+
+  const nextIndex = Math.max(0, Math.min(currentGame.choices.length - 1, currentGame.selectedChoice + step));
+  if (nextIndex === currentGame.selectedChoice) {
+    return;
+  }
+  currentGame.selectedChoice = nextIndex;
+  renderGameScreen();
+}
+
+function handleGameDirection(step) {
+  if (!currentGame) {
+    return;
+  }
+
+  if (currentGame.id === "brick") {
+    moveBrickPaddle(step);
+    return;
+  }
+
+  if (currentGame.id === "music-quiz") {
+    moveMusicQuizChoice(step);
+  }
+}
+
+function handleGameSelect() {
+  if (!currentGame) {
+    return;
+  }
+
+  if (currentGame.id === "brick") {
+    if (currentGame.phase === "intro" || currentGame.phase === "gameover") {
+      beginBrickGame();
+      return;
+    }
+
+    haptics.select();
+    if (currentGame.phase === "playing") {
+      currentGame.phase = "paused";
+      currentGame.title = "Brick";
+      currentGame.subtitle = "Paused";
+      currentGame.instructions = "Press center to resume";
+      currentGame.footer = "Menu returns to Games";
+      stopBrickLoop();
+      syncUi();
+      return;
+    }
+
+    if (currentGame.phase === "paused") {
+      currentGame.phase = "playing";
+      currentGame.title = "Brick";
+      currentGame.subtitle = "";
+      currentGame.instructions = "";
+      currentGame.footer = "Center pauses";
+      startBrickLoop();
+      syncUi();
+    }
+    return;
+  }
+
+  if (currentGame.id === "music-quiz") {
+    if (currentGame.phase === "intro") {
+      beginMusicQuizGame();
+      return;
+    }
+
+    if (currentGame.phase === "empty" || currentGame.phase === "unavailable") {
+      return;
+    }
+
+    haptics.select();
+    if (currentGame.phase === "question") {
+      const selectedChoice = currentGame.choices[currentGame.selectedChoice];
+      const isCorrect = Boolean(selectedChoice?.correct);
+      if (isCorrect) {
+        currentGame.score += 1;
+      }
+      currentGame.phase = "feedback";
+      currentGame.title = isCorrect ? "Correct" : "Wrong";
+      currentGame.subtitle = isCorrect ? selectedChoice.label : `Answer: ${currentGame.lastCorrectLabel}`;
+      currentGame.instructions = "Press center to continue";
+      currentGame.footer = `Score ${currentGame.score} of ${currentGame.roundIndex + 1}`;
+      syncUi();
+      return;
+    }
+
+    if (currentGame.phase === "feedback") {
+      if (currentGame.roundIndex + 1 >= currentGame.totalRounds) {
+        currentGame.phase = "gameover";
+        currentGame.title = "Quiz Complete";
+        currentGame.subtitle = `${currentGame.score}/${currentGame.totalRounds} correct`;
+        currentGame.instructions = "Press center to play again";
+        currentGame.footer = "Menu returns to Games";
+        syncUi();
+        return;
+      }
+
+      currentGame.roundIndex += 1;
+      beginMusicQuizRound();
+      return;
+    }
+
+    if (currentGame.phase === "gameover") {
+      beginMusicQuizGame();
+    }
+  }
+}
+
+function getPhotoIndex(photoId) {
+  return getDisplayPhotos().findIndex((photo) => photo.id === photoId);
+}
+
+function getCurrentPhoto() {
+  return getDisplayPhotos().find((photo) => photo.id === currentPhotoId) || null;
+}
+
+function persistPhotoLibrary() {
+  try {
+    const serialized = libraryPhotos.map((photo) => ({
+      id: photo.id,
+      fileName: photo.fileName,
+      previewUrl: photo.previewUrl,
+      importedAt: photo.importedAt,
+    }));
+    window.sessionStorage.setItem(PHOTO_LIBRARY_SESSION_KEY, JSON.stringify(serialized));
+  } catch (error) {
+    // Ignore browser storage errors and keep photos in-memory for the current page.
+  }
+}
+
+function loadPersistedPhotos() {
+  try {
+    const rawValue = window.sessionStorage.getItem(PHOTO_LIBRARY_SESSION_KEY);
+    if (!rawValue) {
+      libraryPhotos = [];
+      return;
+    }
+
+    const parsed = JSON.parse(rawValue);
+    libraryPhotos = Array.isArray(parsed)
+      ? parsed
+          .filter((photo) => photo && typeof photo.previewUrl === "string" && typeof photo.fileName === "string")
+          .map((photo) => createPhotoRecord(photo))
+      : [];
+  } catch (error) {
+    libraryPhotos = [];
+  }
+}
+
+function renderPhotoViewer() {
+  const currentPhoto = getCurrentPhoto();
+  if (!currentPhoto) {
+    photoViewerImage.removeAttribute("src");
+    photoViewerImage.classList.add("hidden");
+    photoViewerPlaceholder.classList.remove("hidden");
+    photoViewerTitle.textContent = "";
+    photoViewerCounter.textContent = "";
+    return;
+  }
+
+  const photoIndex = getPhotoIndex(currentPhoto.id);
+  photoViewerImage.src = currentPhoto.previewUrl;
+  photoViewerImage.alt = currentPhoto.fileName;
+  photoViewerImage.classList.remove("hidden");
+  photoViewerPlaceholder.classList.add("hidden");
+  photoViewerTitle.textContent = currentPhoto.fileName;
+  photoViewerCounter.textContent =
+    photoIndex === -1 ? "" : `${photoIndex + 1} of ${libraryPhotos.length}`;
+}
+
 function renderPlayer() {
   if (!currentSong) {
     playerTitle.textContent = "";
@@ -995,9 +1873,19 @@ async function activateLibraryItem(itemData) {
     return;
   }
 
+  if (itemData.type === "action" && itemData.id === "sync") {
+    await openSyncUtility();
+    return;
+  }
+
   if (itemData.type === "action" && itemData.id === "customize") {
     screenMode = "customize";
     syncUi();
+    return;
+  }
+
+  if (itemData.type === "game") {
+    openGame(itemData.id);
     return;
   }
 
@@ -1005,6 +1893,13 @@ async function activateLibraryItem(itemData) {
     libraryPath = [...libraryPath, itemData.id];
     selectedIndex = 0;
     highlightedSongId = "";
+    syncUi();
+    return;
+  }
+
+  if (itemData.type === "photo") {
+    currentPhotoId = itemData.id;
+    screenMode = "photo-viewer";
     syncUi();
     return;
   }
@@ -1064,6 +1959,12 @@ function renderLibrary() {
       const song = itemData.song;
       itemTitle.textContent = song.title || song.fileName;
       itemMeta.textContent = [song.artist || "Unknown Artist", song.category || "Music"].join(" • ");
+    } else if (itemData.type === "photo") {
+      itemTitle.textContent = itemData.photo.fileName;
+      itemMeta.textContent = "Photo";
+    } else if (itemData.type === "game") {
+      itemTitle.textContent = itemData.title;
+      itemMeta.textContent = itemData.meta || "";
     } else {
       itemTitle.textContent = itemData.title;
       itemMeta.textContent = itemData.meta || "";
@@ -1134,7 +2035,46 @@ function syncUi() {
   syncWheelButtons();
   renderConvertScreen();
   renderLibrary();
+  renderSyncScreen();
+  renderPhotoViewer();
+  renderGameScreen();
   renderPlayer();
+}
+
+async function refreshSyncStatus() {
+  const previousState = syncViewState.state;
+  const payload = await fetchSyncPayload("/api/sync/status");
+  syncViewState = normalizeSyncViewState(payload);
+  if (previousState !== "success" && syncViewState.state === "success") {
+    haptics.success();
+  }
+  syncUi();
+}
+
+async function startSyncNow() {
+  if (!syncViewState.canStart || syncViewState.busy) {
+    return;
+  }
+
+  haptics.confirm();
+  const previousState = syncViewState.state;
+  const payload = await fetchSyncPayload("/api/sync/start", {
+    method: "POST",
+  });
+  syncViewState = normalizeSyncViewState(payload);
+  if (previousState !== "success" && syncViewState.state === "success") {
+    haptics.success();
+  }
+  syncUi();
+}
+
+async function openSyncUtility() {
+  previewAudio.pause();
+  screenMode = "sync";
+  syncViewState = normalizeSyncViewState();
+  syncUi();
+  await refreshSyncStatus();
+  startSyncPolling();
 }
 
 function setMessage(text, kind = "success") {
@@ -1249,6 +2189,43 @@ async function loadPersistedLibrary() {
   }
 }
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(new Error(`Could not import ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function importPhotoFiles(fileList) {
+  const photoFiles = Array.from(fileList || []).filter(isPhotoFile);
+  if (photoFiles.length === 0) {
+    return 0;
+  }
+
+  const importedPhotos = [];
+  for (const file of photoFiles) {
+    const previewUrl = await readFileAsDataUrl(file);
+    importedPhotos.push(
+      createPhotoRecord({
+        id:
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        fileName: file.name,
+        previewUrl,
+        importedAt: Date.now() + importedPhotos.length,
+      })
+    );
+  }
+
+  libraryPhotos.push(...importedPhotos);
+  persistPhotoLibrary();
+  currentPhotoId = importedPhotos[importedPhotos.length - 1]?.id || currentPhotoId;
+  return importedPhotos.length;
+}
+
 async function uploadSingleFile(file) {
   const formData = new FormData();
   formData.append("file", file);
@@ -1311,14 +2288,52 @@ async function uploadFiles(fileList) {
   }
 }
 
+async function handleImportedFiles(fileList) {
+  const files = Array.from(fileList || []);
+  fileInput.value = "";
+  if (files.length === 0) {
+    setMessage("Choose a supported file first.", "error");
+    return;
+  }
+
+  const photoFiles = files.filter(isPhotoFile);
+  const mediaFiles = files.filter(isSupportedFile);
+
+  if (photoFiles.length > 0) {
+    try {
+      await importPhotoFiles(photoFiles);
+    } catch (error) {
+      setMessage(error.message, "error");
+      return;
+    }
+  }
+
+  if (mediaFiles.length > 0) {
+    await uploadFiles(mediaFiles);
+    return;
+  }
+
+  if (photoFiles.length > 0) {
+    libraryPath = ["main", "photos"];
+    selectedIndex = 0;
+    highlightedSongId = "";
+    screenMode = "library";
+    syncUi();
+    setMessage("");
+    return;
+  }
+
+  setMessage("Choose a supported audio, video, or photo file first.", "error");
+}
+
 uploadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  await uploadFiles(fileInput.files);
+  await handleImportedFiles(fileInput.files);
 });
 
 fileInput.addEventListener("change", async () => {
   if (fileInput.files.length > 0) {
-    await uploadFiles(fileInput.files);
+    await handleImportedFiles(fileInput.files);
   }
 });
 
@@ -1379,6 +2394,7 @@ document.querySelectorAll("[data-wheel-theme]").forEach((button) => {
 });
 
 menuButton.addEventListener("click", () => {
+  haptics.back();
   if (screenMode === "library") {
     if (libraryPath.length > 1) {
       libraryPath = libraryPath.slice(0, -1);
@@ -1388,12 +2404,35 @@ menuButton.addEventListener("click", () => {
     }
     return;
   } else {
+    if (screenMode === "sync") {
+      stopSyncPolling();
+    }
+    if (screenMode === "game") {
+      stopBrickLoop();
+      libraryPath = ["main", "games"];
+      selectedIndex = Math.max(0, getGameMenuIndex(currentGame?.id || ""));
+      currentGame = null;
+      highlightedSongId = "";
+      screenMode = "library";
+      syncUi();
+      return;
+    }
+    if (screenMode === "photo-viewer") {
+      libraryPath = ["main", "photos"];
+      selectedIndex = Math.max(0, getPhotoIndex(currentPhotoId));
+      highlightedSongId = "";
+      screenMode = "library";
+      syncUi();
+      return;
+    }
     if (screenMode === "customize") {
       libraryPath = ["main", "settings"];
+    } else if (screenMode === "sync") {
+      libraryPath = ["main"];
     } else {
       libraryPath = ["main"];
+      selectedIndex = 0;
     }
-    selectedIndex = 0;
     highlightedSongId = "";
     screenMode = "library";
   }
@@ -1401,8 +2440,25 @@ menuButton.addEventListener("click", () => {
 });
 
 rewindButton.addEventListener("click", async () => {
+  haptics.transport();
   if (screenMode === "library") {
-    moveLibrarySelection(-1);
+    moveLibrarySelection(-1, "button");
+    return;
+  }
+
+  if (screenMode === "game") {
+    handleGameDirection(-1);
+    return;
+  }
+
+  if (screenMode === "photo-viewer") {
+    const currentIndex = getPhotoIndex(currentPhotoId);
+    if (currentIndex <= 0) {
+      return;
+    }
+    currentPhotoId = getDisplayPhotos()[currentIndex - 1]?.id || currentPhotoId;
+    selectedIndex = currentIndex - 1;
+    syncUi();
     return;
   }
 
@@ -1424,8 +2480,26 @@ rewindButton.addEventListener("click", async () => {
 });
 
 forwardButton.addEventListener("click", async () => {
+  haptics.transport();
   if (screenMode === "library") {
-    moveLibrarySelection(1);
+    moveLibrarySelection(1, "button");
+    return;
+  }
+
+  if (screenMode === "game") {
+    handleGameDirection(1);
+    return;
+  }
+
+  if (screenMode === "photo-viewer") {
+    const currentIndex = getPhotoIndex(currentPhotoId);
+    const displayPhotos = getDisplayPhotos();
+    if (currentIndex === -1 || currentIndex >= displayPhotos.length - 1) {
+      return;
+    }
+    currentPhotoId = displayPhotos[currentIndex + 1]?.id || currentPhotoId;
+    selectedIndex = currentIndex + 1;
+    syncUi();
     return;
   }
 
@@ -1448,7 +2522,8 @@ forwardButton.addEventListener("click", async () => {
 
 ["dragenter", "dragover"].forEach((eventName) => {
   ipodScreen.addEventListener(eventName, (event) => {
-    if (screenMode !== "edit") {
+    const types = Array.from(event.dataTransfer?.types || []);
+    if (!types.includes("Files")) {
       return;
     }
     event.preventDefault();
@@ -1458,23 +2533,17 @@ forwardButton.addEventListener("click", async () => {
 
 ["dragleave", "dragend"].forEach((eventName) => {
   ipodScreen.addEventListener(eventName, (event) => {
-    if (screenMode !== "edit") {
-      return;
-    }
     event.preventDefault();
     ipodScreen.classList.remove("is-dragging");
   });
 });
 
 ipodScreen.addEventListener("drop", async (event) => {
-  if (screenMode !== "edit") {
-    return;
-  }
   event.preventDefault();
   ipodScreen.classList.remove("is-dragging");
   const files = event.dataTransfer?.files;
   if (files && files.length > 0) {
-    await uploadFiles(files);
+    await handleImportedFiles(files);
   }
 });
 
@@ -1495,12 +2564,12 @@ ipodScreen.addEventListener(
     screenScrollAccumulator += event.deltaY;
 
     while (screenScrollAccumulator >= SCROLL_STEP_DELTA) {
-      moveLibrarySelection(1);
+      moveLibrarySelection(1, "wheel");
       screenScrollAccumulator -= SCROLL_STEP_DELTA;
     }
 
     while (screenScrollAccumulator <= -SCROLL_STEP_DELTA) {
-      moveLibrarySelection(-1);
+      moveLibrarySelection(-1, "wheel");
       screenScrollAccumulator += SCROLL_STEP_DELTA;
     }
   },
@@ -1539,12 +2608,12 @@ clickWheel.addEventListener("pointermove", (event) => {
   wheelDrag.accumulatedAngle += delta;
 
   while (wheelDrag.accumulatedAngle >= SCROLL_STEP_ANGLE) {
-    moveLibrarySelection(1);
+    moveLibrarySelection(1, "wheel");
     wheelDrag.accumulatedAngle -= SCROLL_STEP_ANGLE;
   }
 
   while (wheelDrag.accumulatedAngle <= -SCROLL_STEP_ANGLE) {
-    moveLibrarySelection(-1);
+    moveLibrarySelection(-1, "wheel");
     wheelDrag.accumulatedAngle += SCROLL_STEP_ANGLE;
   }
 });
@@ -1574,6 +2643,7 @@ metadataForm.addEventListener("submit", async (event) => {
 
   saveActiveMetadata();
   isExporting = true;
+  haptics.confirm();
   syncSelectButton();
   setMessage(`Converting ${activeUpload.originalName}...`);
 
@@ -1636,6 +2706,7 @@ metadataForm.addEventListener("submit", async (event) => {
     }
 
     screenMode = "edit";
+    haptics.success();
     syncUi();
     setMessage("");
   } catch (error) {
@@ -1651,6 +2722,16 @@ selectButton.addEventListener("click", async () => {
     return;
   }
 
+  if (screenMode === "game") {
+    handleGameSelect();
+    return;
+  }
+
+  if (screenMode === "sync") {
+    await startSyncNow();
+    return;
+  }
+
   if (screenMode === "edit") {
     metadataForm.requestSubmit();
     return;
@@ -1662,6 +2743,11 @@ selectButton.addEventListener("click", async () => {
     if (!selectedItem) {
       return;
     }
+    if (selectedItem.type === "action" || selectedItem.type === "game") {
+      haptics.confirm();
+    } else {
+      haptics.select();
+    }
     await activateLibraryItem(selectedItem);
   }
 });
@@ -1671,6 +2757,7 @@ playbackButton.addEventListener("click", async () => {
     return;
   }
 
+  haptics.transport();
   if (!previewAudio.src) {
     previewAudio.src = currentSong.playbackUrl;
   }
@@ -1710,4 +2797,6 @@ convertResultArtwork.addEventListener("error", () => {
 
 syncUi();
 renderPlayer();
+loadPersistedPhotos();
+syncUi();
 void loadPersistedLibrary();
