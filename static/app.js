@@ -112,6 +112,12 @@ const WHEEL_MAX_DELTA = 0.55;
 const WHEEL_DELTA_SMOOTHING = 0.32;
 const WHEEL_MIN_DELTA = 0.012;
 const WHEEL_RADIAL_DRIFT_LIMIT = 0.12;
+const WHEEL_ACCELERATION_START = 0.008;
+const WHEEL_ACCELERATION_FACTOR = 18;
+const WHEEL_ACCELERATION_CAP = 0.85;
+const WHEEL_FAST_SPIN_SPEED = 0.022;
+const WHEEL_MEDIUM_SPIN_SPEED = 0.012;
+const WHEEL_DIRECTION_LOCK_ANGLE = 0.055;
 const BRICK_LEVEL_LAYOUTS = [
   [
     [1, 1, 1, 1, 1, 1],
@@ -241,6 +247,7 @@ let activeUploadIndex = 0;
 let selectedIndex = 0;
 let previousScreenMode = "library";
 let wheelDrag = null;
+let librarySelectionPulseTimer = null;
 let libraryPath = ["main"];
 let screenScrollAccumulator = 0;
 let syncPollTimer = null;
@@ -1080,6 +1087,39 @@ function clampSelectedIndex() {
   selectedIndex = Math.max(0, Math.min(selectedIndex, libraryState.items.length - 1));
 }
 
+function pulseLibrarySelection() {
+  if (!librarySelectionBar || !libraryPanel) {
+    return;
+  }
+
+  libraryPanel.classList.remove("is-selection-feedback");
+  librarySelectionBar.classList.remove("is-feedback");
+  void libraryPanel.offsetWidth;
+  void librarySelectionBar.offsetWidth;
+  libraryPanel.classList.add("is-selection-feedback");
+  librarySelectionBar.classList.add("is-feedback");
+  if (librarySelectionPulseTimer) {
+    window.clearTimeout(librarySelectionPulseTimer);
+  }
+  librarySelectionPulseTimer = window.setTimeout(() => {
+    libraryPanel.classList.remove("is-selection-feedback");
+    librarySelectionBar.classList.remove("is-feedback");
+    librarySelectionPulseTimer = null;
+  }, 140);
+}
+
+function handleWheelStep(step) {
+  if (screenMode === "library") {
+    moveLibrarySelection(step, "wheel");
+    return;
+  }
+
+  if (screenMode === "game") {
+    haptics.tick();
+    handleGameDirection(step);
+  }
+}
+
 function moveLibrarySelection(step, source = "generic") {
   const libraryState = getLibraryState();
   if (screenMode !== "library" || libraryState.items.length === 0 || step === 0) {
@@ -1096,8 +1136,10 @@ function moveLibrarySelection(step, source = "generic") {
   highlightedSongId = selectedItem?.type === "song" ? selectedItem.id : "";
   if (source === "wheel") {
     haptics.tick();
+    pulseLibrarySelection();
   } else {
     haptics.navigate();
+    pulseLibrarySelection();
   }
   syncUi();
 }
@@ -1147,8 +1189,57 @@ function stopWheelDrag() {
     return;
   }
 
+  if (wheelDrag.rafId) {
+    window.cancelAnimationFrame(wheelDrag.rafId);
+  }
   clickWheel.classList.remove("is-scrolling");
   wheelDrag = null;
+}
+
+function scheduleWheelFrame() {
+  if (!wheelDrag || wheelDrag.rafId) {
+    return;
+  }
+
+  wheelDrag.rafId = window.requestAnimationFrame(() => {
+    if (!wheelDrag) {
+      return;
+    }
+
+    wheelDrag.rafId = 0;
+    wheelDrag.detentAccumulator += wheelDrag.pendingDelta;
+    wheelDrag.pendingDelta = 0;
+
+    const speed = Math.abs(wheelDrag.smoothedVelocity);
+    const detentAngle =
+      speed >= WHEEL_FAST_SPIN_SPEED
+        ? WHEEL_DETENT_ANGLE * 0.82
+        : speed >= WHEEL_MEDIUM_SPIN_SPEED
+          ? WHEEL_DETENT_ANGLE * 0.9
+          : WHEEL_DETENT_ANGLE;
+    const maxSteps =
+      speed >= WHEEL_FAST_SPIN_SPEED ? 4 : speed >= WHEEL_MEDIUM_SPIN_SPEED ? 2 : 1;
+    let stepsTaken = 0;
+
+    while (wheelDrag.detentAccumulator >= detentAngle && stepsTaken < maxSteps) {
+      handleWheelStep(1);
+      wheelDrag.detentAccumulator -= detentAngle;
+      stepsTaken += 1;
+    }
+
+    while (wheelDrag.detentAccumulator <= -detentAngle && stepsTaken < maxSteps) {
+      handleWheelStep(-1);
+      wheelDrag.detentAccumulator += detentAngle;
+      stepsTaken += 1;
+    }
+
+    if (
+      wheelDrag &&
+      (Math.abs(wheelDrag.pendingDelta) > 0 || Math.abs(wheelDrag.detentAccumulator) >= detentAngle)
+    ) {
+      scheduleWheelFrame();
+    }
+  });
 }
 
 function applyThemeVariables(theme) {
@@ -1632,13 +1723,16 @@ function renderGameScreen() {
   const isBrickPaused = isBrick && gameState.phase === "paused";
   const showCanvas = isBrick;
   const showMessage = isBrick ? gameState.phase !== "playing" : !isQuizQuestion;
+  const showGameHud = Boolean(gameState.showHud) && (
+    !isBrick || gameState.phase === "playing" || gameState.phase === "paused"
+  );
 
   gameScreenBody.dataset.gameId = gameState.id || "";
   gameScreenBody.dataset.gamePhase = gameState.phase || "intro";
   gameStatusTitle.textContent = gameState.title || "Games";
-  gameHud.classList.toggle("hidden", !gameState.showHud);
-  gameScoreLabel.textContent = gameState.showHud ? `Score ${String(gameState.score || 0).padStart(3, "0")}` : "";
-  gameRoundLabel.textContent = gameState.roundLabel || "";
+  gameHud.classList.toggle("hidden", !showGameHud);
+  gameScoreLabel.textContent = showGameHud ? `Score ${String(gameState.score || 0).padStart(3, "0")}` : "";
+  gameRoundLabel.textContent = showGameHud ? gameState.roundLabel || "" : "";
   gameCanvas.classList.toggle("hidden", !showCanvas);
   gameCanvas.setAttribute("aria-hidden", showCanvas ? "false" : "true");
   gameMessageScreen.classList.toggle("hidden", !showMessage);
@@ -2938,7 +3032,10 @@ ipodScreen.addEventListener(
 );
 
 clickWheel.addEventListener("pointerdown", (event) => {
-  if (screenMode !== "library" || event.button !== 0) {
+  const supportsWheelGesture =
+    screenMode === "library" ||
+    (screenMode === "game" && (currentGame?.id === "brick" || currentGame?.id === "music-quiz"));
+  if (!supportsWheelGesture || event.button !== 0) {
     return;
   }
 
@@ -2956,8 +3053,13 @@ clickWheel.addEventListener("pointerdown", (event) => {
     pointerId: event.pointerId,
     lastAngle: position.angle,
     lastRadius: position.normalizedRadius,
-    accumulatedAngle: 0,
+    lastTimestamp: event.timeStamp || performance.now(),
+    detentAccumulator: 0,
+    pendingDelta: 0,
     smoothedDelta: 0,
+    smoothedVelocity: 0,
+    direction: 0,
+    rafId: 0,
   };
   clickWheel.classList.add("is-scrolling");
   clickWheel.setPointerCapture(event.pointerId);
@@ -2965,7 +3067,10 @@ clickWheel.addEventListener("pointerdown", (event) => {
 });
 
 clickWheel.addEventListener("pointermove", (event) => {
-  if (!wheelDrag || wheelDrag.pointerId !== event.pointerId || screenMode !== "library") {
+  const supportsWheelGesture =
+    screenMode === "library" ||
+    (screenMode === "game" && (currentGame?.id === "brick" || currentGame?.id === "music-quiz"));
+  if (!wheelDrag || wheelDrag.pointerId !== event.pointerId || !supportsWheelGesture) {
     return;
   }
 
@@ -2973,8 +3078,11 @@ clickWheel.addEventListener("pointermove", (event) => {
   const nextAngle = position.angle;
   let delta = normalizeAngleDelta(nextAngle - wheelDrag.lastAngle);
   const radialDrift = Math.abs(position.normalizedRadius - wheelDrag.lastRadius);
+  const timestamp = event.timeStamp || performance.now();
+  const deltaTime = Math.max(8, timestamp - wheelDrag.lastTimestamp);
   wheelDrag.lastAngle = nextAngle;
   wheelDrag.lastRadius = position.normalizedRadius;
+  wheelDrag.lastTimestamp = timestamp;
 
   if (!isWheelDragPosition(position)) {
     wheelDrag.smoothedDelta *= 0.6;
@@ -2996,20 +3104,29 @@ clickWheel.addEventListener("pointermove", (event) => {
     return;
   }
 
+  if (
+    wheelDrag.direction !== 0 &&
+    Math.sign(delta) !== wheelDrag.direction &&
+    Math.abs(delta) < WHEEL_DIRECTION_LOCK_ANGLE &&
+    Math.abs(wheelDrag.detentAccumulator) > WHEEL_DETENT_ANGLE * 0.24
+  ) {
+    event.preventDefault();
+    return;
+  }
+
   wheelDrag.smoothedDelta =
     wheelDrag.smoothedDelta * WHEEL_DELTA_SMOOTHING +
     delta * (1 - WHEEL_DELTA_SMOOTHING);
-  wheelDrag.accumulatedAngle += wheelDrag.smoothedDelta;
-
-  while (wheelDrag.accumulatedAngle >= WHEEL_DETENT_ANGLE) {
-    moveLibrarySelection(1, "wheel");
-    wheelDrag.accumulatedAngle -= WHEEL_DETENT_ANGLE;
-  }
-
-  while (wheelDrag.accumulatedAngle <= -WHEEL_DETENT_ANGLE) {
-    moveLibrarySelection(-1, "wheel");
-    wheelDrag.accumulatedAngle += WHEEL_DETENT_ANGLE;
-  }
+  wheelDrag.direction = Math.sign(wheelDrag.smoothedDelta) || wheelDrag.direction;
+  wheelDrag.smoothedVelocity =
+    wheelDrag.smoothedVelocity * 0.72 +
+    (wheelDrag.smoothedDelta / deltaTime) * 0.28;
+  const accelerationBoost = 1 + Math.min(
+    WHEEL_ACCELERATION_CAP,
+    Math.max(0, Math.abs(wheelDrag.smoothedVelocity) - WHEEL_ACCELERATION_START) * WHEEL_ACCELERATION_FACTOR
+  );
+  wheelDrag.pendingDelta += wheelDrag.smoothedDelta * accelerationBoost;
+  scheduleWheelFrame();
 
   event.preventDefault();
 });

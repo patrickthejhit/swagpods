@@ -1583,21 +1583,28 @@ code {
 .game-screen-body {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: 1fr auto;
   gap: 0.35rem;
   padding: 6px 7px 8px;
+  position: relative;
 }
 
 .game-hud {
+  position: absolute;
+  top: 0.42rem;
+  left: 0.5rem;
+  right: 0.5rem;
+  z-index: 3;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  min-height: 1rem;
+  min-height: 0;
   color: #26352b;
-  font-size: 0.62rem;
+  font-size: 0.58rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  pointer-events: none;
 }
 
 .game-stage {
@@ -1672,6 +1679,26 @@ code {
   color: #405447;
   font-size: 0.68rem;
   line-height: 1.35;
+}
+
+.game-screen-body[data-game-id="brick"] .game-hud {
+  color: rgba(240, 248, 242, 0.98);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.58);
+}
+
+.game-screen-body[data-game-id="brick"] .game-title {
+  color: #f6fbf8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.42);
+}
+
+.game-screen-body[data-game-id="brick"] .game-subtitle {
+  color: rgba(243, 248, 244, 0.94);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.38);
+}
+
+.game-screen-body[data-game-id="brick"] .game-instructions {
+  color: rgba(230, 239, 233, 0.9);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.32);
 }
 
 .game-pause-overlay {
@@ -1815,7 +1842,26 @@ code {
 }
 
 .library-selection-bar {
-  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 35px;
+  background: linear-gradient(180deg, var(--highlight-top) 0%, var(--highlight-bottom) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.08);
+  transition: transform 95ms ease-out, filter 120ms ease-out;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.library-selection-bar.is-feedback {
+  filter: brightness(1.08) saturate(1.04);
+}
+
+.library-panel.is-selection-feedback .library-item.is-selected {
+  filter: brightness(1.08) saturate(1.04);
 }
 
 .library-list {
