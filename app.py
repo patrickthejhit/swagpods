@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
+from datetime import datetime
 from pathlib import Path
 from shutil import copy2
 
-from flask import Flask, Response, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from mutagen import File as MutagenFile
 from mutagen.id3 import APIC, ID3, TALB, TCON, TIT2, TPE1, ID3NoHeaderError
 from werkzeug.utils import secure_filename
@@ -34,6 +41,19 @@ IPOD_STAGE_SCRIPT = SCRIPT_DIR / "ipod_stage_all.sh"
 IPOD_RESUME_SCRIPT = SCRIPT_DIR / "ipod_resume_pipeline.sh"
 DEFAULT_IPOD_TARGET_VOLUME = "/Volumes/4 tb backup"
 DEFAULT_IPOD_PROJECT_ROOT = f"{DEFAULT_IPOD_TARGET_VOLUME}/codex ipod ready 500gb"
+SPOTIFY_SESSION_DIR = BASE_DIR / ".spotify_sessions"
+SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_API_BASE = "https://api.spotify.com/v1"
+SPOTIFY_DEFAULT_SCOPES = (
+    "playlist-read-private "
+    "playlist-read-collaborative "
+    "user-read-playback-state "
+    "user-read-currently-playing "
+    "user-modify-playback-state"
+)
+SPOTIFY_DEFAULT_REDIRECT_PATH = "/spotify/callback"
+SPOTIFY_USER_AGENT = "swagpods-spotify-connect/1.0"
 
 AUDIO_FIELD_MAP = {
     "title": ("title", TIT2),
@@ -112,6 +132,10 @@ VIDEO_QUALITY_FACTORS = {
 
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY") or "dev-only-change-me"
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "0") == "1"
 SYNC_LOCK = threading.Lock()
 SYNC_PROCESS: subprocess.Popen[str] | None = None
 SYNC_PROCESS_KIND: str | None = None
@@ -144,6 +168,299 @@ def ensure_directories() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+    SPOTIFY_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _b64url_no_padding(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def get_app_base_url() -> str:
+    configured = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    return request.url_root.rstrip("/")
+
+
+def get_spotify_oauth_config() -> dict[str, str]:
+    # Set these env vars in your Render/local environment:
+    # - SPOTIFY_CLIENT_ID: client ID from your Spotify developer app
+    # - SPOTIFY_REDIRECT_URI: exact callback URL registered in Spotify dashboard
+    # - SPOTIFY_SCOPES: space-delimited scopes to request
+    redirect_uri = os.environ.get("SPOTIFY_REDIRECT_URI", "").strip()
+    if not redirect_uri:
+        redirect_uri = f"{get_app_base_url()}{SPOTIFY_DEFAULT_REDIRECT_PATH}"
+
+    return {
+        "clientId": os.environ.get("SPOTIFY_CLIENT_ID", "").strip(),
+        "redirectUri": redirect_uri,
+        "scopes": os.environ.get("SPOTIFY_SCOPES", SPOTIFY_DEFAULT_SCOPES).strip() or SPOTIFY_DEFAULT_SCOPES,
+    }
+
+
+def get_session_id() -> str:
+    session_id = str(session.get("app_session_id", "")).strip()
+    if session_id:
+        return session_id
+    session_id = uuid.uuid4().hex
+    session["app_session_id"] = session_id
+    return session_id
+
+
+def get_spotify_session_path() -> Path:
+    return SPOTIFY_SESSION_DIR / f"{get_session_id()}.json"
+
+
+def load_spotify_session_data() -> dict[str, object]:
+    path = get_spotify_session_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_spotify_session_data(payload: dict[str, object]) -> None:
+    path = get_spotify_session_path()
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def clear_spotify_session_data() -> None:
+    path = get_spotify_session_path()
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def spotify_is_configured() -> bool:
+    return bool(get_spotify_oauth_config()["clientId"])
+
+
+def spotify_token_request(form_data: dict[str, str]) -> dict[str, object]:
+    encoded = urllib.parse.urlencode(form_data).encode("utf-8")
+    request_obj = urllib.request.Request(
+        SPOTIFY_TOKEN_URL,
+        data=encoded,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=30) as response:
+            payload = response.read().decode("utf-8")
+        data = json.loads(payload)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(
+            f"Spotify token request failed ({exc.code}). Check SPOTIFY_REDIRECT_URI and your Spotify app settings. {detail}"
+        ) from exc
+
+    if "access_token" not in data:
+        raise RuntimeError("Spotify token response did not contain an access token.")
+
+    expires_in = int(data.get("expires_in", 3600) or 3600)
+    data["expires_at"] = int(datetime.now().timestamp()) + expires_in
+    return data
+
+
+def refresh_spotify_access_token(refresh_token: str, client_id: str) -> dict[str, object]:
+    refreshed = spotify_token_request(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }
+    )
+    refreshed["refresh_token"] = refresh_token
+    return refreshed
+
+
+def spotify_api_get(access_token: str, endpoint_or_url: str, params: dict[str, object] | None = None) -> dict[str, object]:
+    return spotify_api_request(access_token, "GET", endpoint_or_url, params=params)
+
+
+def spotify_api_request(
+    access_token: str,
+    method: str,
+    endpoint_or_url: str,
+    params: dict[str, object] | None = None,
+    body: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if endpoint_or_url.startswith("http://") or endpoint_or_url.startswith("https://"):
+        url = endpoint_or_url
+        if params:
+            url = f"{url}{'&' if '?' in url else '?'}{urllib.parse.urlencode(params)}"
+    else:
+        url = f"{SPOTIFY_API_BASE}{endpoint_or_url}"
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+
+    payload_bytes = None
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "User-Agent": SPOTIFY_USER_AGENT,
+    }
+    if body is not None:
+        payload_bytes = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request_obj = urllib.request.Request(
+        url,
+        data=payload_bytes,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=30) as response:
+            payload = response.read().decode("utf-8")
+        return json.loads(payload) if payload else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Spotify API request failed ({exc.code}). {detail}") from exc
+
+
+def get_valid_spotify_access_token() -> str:
+    config = get_spotify_oauth_config()
+    session_data = load_spotify_session_data()
+    access_token = str(session_data.get("access_token", "")).strip()
+    expires_at = int(session_data.get("expires_at", 0) or 0)
+    if access_token and expires_at > int(datetime.now().timestamp()) + 60:
+        return access_token
+
+    refresh_token = str(session_data.get("refresh_token", "")).strip()
+    if not refresh_token or not config["clientId"]:
+        raise RuntimeError("Spotify session is missing or expired.")
+
+    refreshed = refresh_spotify_access_token(refresh_token, config["clientId"])
+    session_data.update(refreshed)
+    save_spotify_session_data(session_data)
+    return str(refreshed["access_token"])
+
+
+def fetch_spotify_profile_and_playlists() -> tuple[dict[str, object], list[dict[str, object]]]:
+    access_token = get_valid_spotify_access_token()
+    profile = spotify_api_get(access_token, "/me")
+    playlists: list[dict[str, object]] = []
+    next_url = f"{SPOTIFY_API_BASE}/me/playlists?limit=50"
+    while next_url:
+        payload = spotify_api_get(access_token, next_url)
+        for item in payload.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+            playlists.append(
+                {
+                    "id": str(item.get("id", "")).strip(),
+                    "name": str(item.get("name", "")).strip() or "Untitled Playlist",
+                    "trackCount": int(((item.get("tracks") or {}).get("total")) or 0),
+                    "spotifyUrl": str(((item.get("external_urls") or {}).get("spotify")) or "").strip(),
+                    "ownerName": str(owner.get("display_name") or owner.get("id") or "").strip(),
+                }
+            )
+        next_url = str(payload.get("next") or "")
+    return profile, playlists
+
+
+def build_spotify_track_payload(track: dict[str, object]) -> dict[str, object]:
+    album_obj = track.get("album") if isinstance(track.get("album"), dict) else {}
+    artist_names: list[str] = []
+    for artist in track.get("artists") or []:
+        if isinstance(artist, dict):
+            name = str(artist.get("name", "")).strip()
+            if name:
+                artist_names.append(name)
+
+    artwork_url = ""
+    for image in album_obj.get("images") or []:
+        if isinstance(image, dict):
+            maybe_url = str(image.get("url", "")).strip()
+            if maybe_url:
+                artwork_url = maybe_url
+                break
+
+    return {
+        "id": str(track.get("id", "")).strip(),
+        "title": str(track.get("name", "")).strip(),
+        "artist": ", ".join(artist_names),
+        "album": str(album_obj.get("name", "")).strip(),
+        "durationMs": int(track.get("duration_ms", 0) or 0),
+        "artworkUrl": artwork_url,
+        "spotifyUrl": str(((track.get("external_urls") or {}).get("spotify")) or "").strip(),
+    }
+
+
+def fetch_spotify_player_state_payload() -> dict[str, object]:
+    access_token = get_valid_spotify_access_token()
+    playback = spotify_api_request(access_token, "GET", "/me/player")
+    if not playback:
+        return {
+            "connected": True,
+            "hasActiveDevice": False,
+            "isPlaying": False,
+            "progressMs": 0,
+            "deviceName": "",
+            "deviceType": "",
+            "track": None,
+        }
+
+    device = playback.get("device") if isinstance(playback.get("device"), dict) else {}
+    item = playback.get("item") if isinstance(playback.get("item"), dict) else {}
+    return {
+        "connected": True,
+        "hasActiveDevice": bool(device),
+        "isPlaying": bool(playback.get("is_playing")),
+        "progressMs": int(playback.get("progress_ms", 0) or 0),
+        "deviceName": str(device.get("name", "")).strip(),
+        "deviceType": str(device.get("type", "")).strip(),
+        "deviceId": str(device.get("id", "")).strip(),
+        "track": build_spotify_track_payload(item) if item else None,
+    }
+
+
+def get_spotify_status_payload() -> dict[str, object]:
+    config = get_spotify_oauth_config()
+    status: dict[str, object] = {
+        "configured": bool(config["clientId"]),
+        "connected": False,
+        "profileName": "",
+        "profileImageUrl": "",
+        "playlists": [],
+        "error": "",
+        "scopes": config["scopes"],
+    }
+
+    if not status["configured"]:
+        status["error"] = "Spotify is not configured yet. Add SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI."
+        return status
+
+    session_data = load_spotify_session_data()
+    if not session_data:
+        return status
+
+    try:
+        profile, playlists = fetch_spotify_profile_and_playlists()
+    except RuntimeError as error:
+        clear_spotify_session_data()
+        status["error"] = str(error)
+        return status
+
+    images = profile.get("images") if isinstance(profile.get("images"), list) else []
+    image_url = ""
+    for image in images:
+        if isinstance(image, dict):
+            maybe_url = str(image.get("url", "")).strip()
+            if maybe_url:
+                image_url = maybe_url
+                break
+
+    status["connected"] = True
+    status["profileName"] = str(profile.get("display_name") or profile.get("id") or "Spotify User").strip()
+    status["profileImageUrl"] = image_url
+    status["playlists"] = playlists
+    return status
 
 
 def get_static_asset_version() -> int:
@@ -921,6 +1238,8 @@ def index():
         export_dir=str(EXPORT_DIR),
         upload_dir=str(UPLOAD_DIR),
         asset_version=get_static_asset_version(),
+        spotify_auth_state=str(request.args.get("spotify", "")).strip(),
+        spotify_auth_error=str(request.args.get("spotify_error", "")).strip(),
     )
 
 
@@ -1048,6 +1367,127 @@ def get_library():
         for file_path in sorted(EXPORT_DIR.glob("*.mp3"), key=lambda path: path.stat().st_mtime)
     ]
     return jsonify({"songs": songs})
+
+
+@app.get("/api/spotify/status")
+def get_spotify_status():
+    ensure_directories()
+    return jsonify(get_spotify_status_payload())
+
+
+@app.post("/api/spotify/connect")
+def start_spotify_connect():
+    ensure_directories()
+    config = get_spotify_oauth_config()
+    if not config["clientId"]:
+        return jsonify({"error": "Spotify is not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI."}), 400
+
+    verifier = _b64url_no_padding(secrets.token_bytes(48))
+    challenge = _b64url_no_padding(hashlib.sha256(verifier.encode("ascii")).digest())
+    state = secrets.token_urlsafe(24)
+    session["spotify_pkce_verifier"] = verifier
+    session["spotify_oauth_state"] = state
+
+    params = {
+        "client_id": config["clientId"],
+        "response_type": "code",
+        "redirect_uri": config["redirectUri"],
+        "scope": config["scopes"],
+        "code_challenge_method": "S256",
+        "code_challenge": challenge,
+        "state": state,
+    }
+    authorize_url = f"{SPOTIFY_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    return jsonify({"authorizeUrl": authorize_url})
+
+
+@app.get("/spotify/callback")
+def spotify_callback():
+    ensure_directories()
+    config = get_spotify_oauth_config()
+    error_value = str(request.args.get("error", "")).strip()
+    if error_value:
+        return redirect(url_for("index", spotify="error", spotify_error=f"Spotify authorization failed: {error_value}"))
+
+    code = str(request.args.get("code", "")).strip()
+    state = str(request.args.get("state", "")).strip()
+    expected_state = str(session.get("spotify_oauth_state", "")).strip()
+    verifier = str(session.get("spotify_pkce_verifier", "")).strip()
+
+    session.pop("spotify_oauth_state", None)
+    session.pop("spotify_pkce_verifier", None)
+
+    if not code or not state or state != expected_state or not verifier:
+        return redirect(url_for("index", spotify="error", spotify_error="Spotify callback validation failed. Try connecting again."))
+
+    try:
+        token_data = spotify_token_request(
+            {
+                "client_id": config["clientId"],
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": config["redirectUri"],
+                "code_verifier": verifier,
+            }
+        )
+    except RuntimeError as error:
+        return redirect(url_for("index", spotify="error", spotify_error=str(error)))
+
+    save_spotify_session_data(
+        {
+            "connected_at": datetime.now().isoformat(),
+            "client_id": config["clientId"],
+            "redirect_uri": config["redirectUri"],
+            "scopes": config["scopes"],
+            **token_data,
+        }
+    )
+    return redirect(url_for("index", spotify="connected"))
+
+
+@app.post("/api/spotify/disconnect")
+def disconnect_spotify():
+    ensure_directories()
+    clear_spotify_session_data()
+    session.pop("spotify_oauth_state", None)
+    session.pop("spotify_pkce_verifier", None)
+    return jsonify({"ok": True})
+
+
+@app.get("/api/spotify/player")
+def get_spotify_player():
+    ensure_directories()
+    try:
+        return jsonify(fetch_spotify_player_state_payload())
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.post("/api/spotify/player/command")
+def spotify_player_command():
+    ensure_directories()
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action", "")).strip().lower()
+    access_token = get_valid_spotify_access_token()
+
+    try:
+        if action == "play":
+            spotify_api_request(access_token, "PUT", "/me/player/play")
+        elif action == "pause":
+            spotify_api_request(access_token, "PUT", "/me/player/pause")
+        elif action == "next":
+            spotify_api_request(access_token, "POST", "/me/player/next")
+        elif action == "previous":
+            spotify_api_request(access_token, "POST", "/me/player/previous")
+        else:
+            return jsonify({"error": "Unsupported Spotify player command."}), 400
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+    try:
+        return jsonify(fetch_spotify_player_state_payload())
+    except RuntimeError:
+        return jsonify({"ok": True, "connected": True})
 
 
 @app.get("/api/sync/status")

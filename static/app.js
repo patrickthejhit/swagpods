@@ -118,6 +118,39 @@ const WHEEL_ACCELERATION_CAP = 0.85;
 const WHEEL_FAST_SPIN_SPEED = 0.022;
 const WHEEL_MEDIUM_SPIN_SPEED = 0.012;
 const WHEEL_DIRECTION_LOCK_ANGLE = 0.055;
+const WHEEL_SCROLL_STEP_DELTA = 24;
+const WHEEL_POINTER_PROFILES = {
+  coarse: {
+    detentAngle: WHEEL_DETENT_ANGLE,
+    maxDelta: WHEEL_MAX_DELTA,
+    smoothing: WHEEL_DELTA_SMOOTHING,
+    minDelta: WHEEL_MIN_DELTA,
+    radialDriftLimit: WHEEL_RADIAL_DRIFT_LIMIT,
+    accelStart: WHEEL_ACCELERATION_START,
+    accelFactor: WHEEL_ACCELERATION_FACTOR,
+    accelCap: WHEEL_ACCELERATION_CAP,
+    fastSpinSpeed: WHEEL_FAST_SPIN_SPEED,
+    mediumSpinSpeed: WHEEL_MEDIUM_SPIN_SPEED,
+    directionLockAngle: WHEEL_DIRECTION_LOCK_ANGLE,
+    maxStepsFast: 4,
+    maxStepsMedium: 2,
+  },
+  fine: {
+    detentAngle: 0.13,
+    maxDelta: 0.42,
+    smoothing: 0.2,
+    minDelta: 0.006,
+    radialDriftLimit: 0.09,
+    accelStart: 0.005,
+    accelFactor: 22,
+    accelCap: 1.05,
+    fastSpinSpeed: 0.016,
+    mediumSpinSpeed: 0.009,
+    directionLockAngle: 0.042,
+    maxStepsFast: 5,
+    maxStepsMedium: 3,
+  },
+};
 const BRICK_LEVEL_LAYOUTS = [
   [
     [1, 1, 1, 1, 1, 1],
@@ -250,6 +283,7 @@ let wheelDrag = null;
 let librarySelectionPulseTimer = null;
 let libraryPath = ["main"];
 let screenScrollAccumulator = 0;
+let screenScrollDirection = 0;
 let syncPollTimer = null;
 let brickLoopTimer = null;
 let brickCountdownTimer = null;
@@ -261,6 +295,26 @@ let syncViewState = {
   canStart: false,
   busy: false,
 };
+let spotifyViewState = {
+  configured: false,
+  connected: false,
+  profileName: "",
+  profileImageUrl: "",
+  playlists: [],
+  error: "",
+  scopes: "",
+};
+let spotifyPlayerState = {
+  connected: false,
+  hasActiveDevice: false,
+  isPlaying: false,
+  progressMs: 0,
+  deviceName: "",
+  deviceType: "",
+  deviceId: "",
+  track: null,
+};
+let spotifyPlayerPollTimer = null;
 
 const haptics = (() => {
   const lastFireTimes = new Map();
@@ -858,6 +912,16 @@ function getLibraryState() {
       : `${podcastSongs.length} podcast${podcastSongs.length === 1 ? "" : "s"}`;
   const photoSummary =
     photoCount === 0 ? "No photos yet." : `${photoCount} photo${photoCount === 1 ? "" : "s"}`;
+  const spotifyConnectedMeta = spotifyViewState.connected
+    ? spotifyViewState.profileName || "Connected"
+    : spotifyViewState.configured
+      ? "Connect"
+      : "Setup";
+  const spotifySummary = !spotifyViewState.configured
+    ? "Spotify is not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI."
+    : spotifyViewState.connected
+      ? `Spotify Connected${spotifyViewState.profileName ? ` • ${spotifyViewState.profileName}` : ""}`
+      : "Connect Spotify to read your playlists.";
 
   switch (getLibraryViewKey()) {
     case "music":
@@ -921,28 +985,67 @@ function getLibraryState() {
       return {
         label: "Main Menu",
         title: "Spotify",
-        summary: "Connect a Spotify account to stream music in the emulator.",
-        items: [
-          {
-            type: "action",
-            id: "spotify-connect",
-            title: "Connect Spotify",
-            meta: "Stream only",
-          },
-          {
-            type: "menu",
-            id: "spotify-library",
-            title: "Your Library",
-            meta: "Coming Soon",
-          },
-        ],
+        summary: spotifySummary,
+        items: spotifyViewState.connected
+          ? [
+              {
+                type: "action",
+                id: "spotify-account",
+                title: "Spotify Connected",
+                meta: spotifyViewState.profileName || "Connected",
+              },
+              {
+                type: "action",
+                id: "spotify-now-playing",
+                title: "Now Playing",
+                meta: spotifyPlayerState.track?.title
+                  ? spotifyPlayerState.isPlaying
+                    ? "Playing"
+                    : "Paused"
+                  : spotifyPlayerState.hasActiveDevice
+                    ? "Ready"
+                    : "Open Spotify App",
+              },
+              {
+                type: "menu",
+                id: "spotify-library",
+                title: "Your Playlists",
+                meta: `${spotifyViewState.playlists.length} playlist${spotifyViewState.playlists.length === 1 ? "" : "s"}`,
+              },
+              {
+                type: "action",
+                id: "spotify-disconnect",
+                title: "Disconnect",
+                meta: "Sign out",
+              },
+            ]
+          : [
+              {
+                type: "action",
+                id: "spotify-connect",
+                title: "Connect Spotify",
+                meta: spotifyViewState.configured ? "OAuth PKCE" : "Setup Required",
+              },
+            ],
       };
     case "spotify-library":
       return {
         label: "Spotify",
-        title: "Your Library",
-        summary: "Spotify browsing is not wired yet.",
-        items: [],
+        title: "Your Playlists",
+        summary: !spotifyViewState.connected
+          ? "Connect Spotify first."
+          : spotifyViewState.playlists.length === 0
+            ? "No playlists returned from Spotify."
+            : `${spotifyViewState.playlists.length} playlist${spotifyViewState.playlists.length === 1 ? "" : "s"} available`,
+        items: !spotifyViewState.connected
+          ? []
+          : spotifyViewState.playlists.map((playlist) => ({
+              type: "action",
+              id: `spotify-playlist:${playlist.id}`,
+              title: playlist.name || "Untitled Playlist",
+              meta: `${playlist.trackCount || 0} track${playlist.trackCount === 1 ? "" : "s"}`,
+              spotifyPlaylist: playlist,
+            })),
       };
     case "podcasts":
       return {
@@ -1073,7 +1176,7 @@ function getLibraryState() {
             type: "menu",
             id: "spotify",
             title: "Spotify",
-            meta: "Connect",
+            meta: spotifyConnectedMeta,
           },
           {
             type: "menu",
@@ -1217,6 +1320,12 @@ function isWheelDragPosition(position) {
   );
 }
 
+function getWheelPointerProfile(pointerType = "") {
+  return pointerType === "mouse" || pointerType === "pen"
+    ? WHEEL_POINTER_PROFILES.fine
+    : WHEEL_POINTER_PROFILES.coarse;
+}
+
 function stopWheelDrag() {
   if (!wheelDrag) {
     return;
@@ -1227,6 +1336,79 @@ function stopWheelDrag() {
   }
   clickWheel.classList.remove("is-scrolling");
   wheelDrag = null;
+}
+
+function bindWheelSectorHighlight(button) {
+  if (!button) {
+    return;
+  }
+
+  const clearPressed = () => {
+    button.classList.remove("is-pressed");
+  };
+
+  button.addEventListener("pointerdown", () => {
+    button.classList.add("is-pressed");
+  });
+  button.addEventListener("pointerup", clearPressed);
+  button.addEventListener("pointercancel", clearPressed);
+  button.addEventListener("lostpointercapture", clearPressed);
+  button.addEventListener("pointerleave", clearPressed);
+  button.addEventListener("blur", clearPressed);
+}
+
+function bindCenterButtonHighlight(button) {
+  if (!button) {
+    return;
+  }
+
+  const clearPressed = () => {
+    button.classList.remove("is-pressed");
+  };
+
+  button.addEventListener("pointerdown", () => {
+    button.classList.add("is-pressed");
+  });
+  button.addEventListener("pointerup", clearPressed);
+  button.addEventListener("pointercancel", clearPressed);
+  button.addEventListener("lostpointercapture", clearPressed);
+  button.addEventListener("pointerleave", clearPressed);
+  button.addEventListener("blur", clearPressed);
+}
+
+function handleWheelScrollDelta(deltaY) {
+  const supportsWheelGesture =
+    screenMode === "library" ||
+    (screenMode === "game" && (currentGame?.id === "brick" || currentGame?.id === "music-quiz"));
+  if (!supportsWheelGesture) {
+    return false;
+  }
+
+  if (screenMode === "library" && getLibraryState().items.length === 0) {
+    return false;
+  }
+
+  const direction = Math.sign(deltaY);
+  if (direction !== 0 && screenScrollDirection !== 0 && direction !== screenScrollDirection) {
+    screenScrollAccumulator = 0;
+  }
+  if (direction !== 0) {
+    screenScrollDirection = direction;
+  }
+
+  screenScrollAccumulator += deltaY;
+
+  while (screenScrollAccumulator >= WHEEL_SCROLL_STEP_DELTA) {
+    handleWheelStep(1);
+    screenScrollAccumulator -= WHEEL_SCROLL_STEP_DELTA;
+  }
+
+  while (screenScrollAccumulator <= -WHEEL_SCROLL_STEP_DELTA) {
+    handleWheelStep(-1);
+    screenScrollAccumulator += WHEEL_SCROLL_STEP_DELTA;
+  }
+
+  return true;
 }
 
 function scheduleWheelFrame() {
@@ -1243,15 +1425,16 @@ function scheduleWheelFrame() {
     wheelDrag.detentAccumulator += wheelDrag.pendingDelta;
     wheelDrag.pendingDelta = 0;
 
+    const profile = wheelDrag.profile || WHEEL_POINTER_PROFILES.coarse;
     const speed = Math.abs(wheelDrag.smoothedVelocity);
     const detentAngle =
-      speed >= WHEEL_FAST_SPIN_SPEED
-        ? WHEEL_DETENT_ANGLE * 0.82
-        : speed >= WHEEL_MEDIUM_SPIN_SPEED
-          ? WHEEL_DETENT_ANGLE * 0.9
-          : WHEEL_DETENT_ANGLE;
+      speed >= profile.fastSpinSpeed
+        ? profile.detentAngle * 0.82
+        : speed >= profile.mediumSpinSpeed
+          ? profile.detentAngle * 0.9
+          : profile.detentAngle;
     const maxSteps =
-      speed >= WHEEL_FAST_SPIN_SPEED ? 4 : speed >= WHEEL_MEDIUM_SPIN_SPEED ? 2 : 1;
+      speed >= profile.fastSpinSpeed ? profile.maxStepsFast : speed >= profile.mediumSpinSpeed ? profile.maxStepsMedium : 1;
     let stepsTaken = 0;
 
     while (wheelDrag.detentAccumulator >= detentAngle && stepsTaken < maxSteps) {
@@ -1304,6 +1487,31 @@ function normalizeSyncViewState(payload = {}) {
   };
 }
 
+function normalizeSpotifyViewState(payload = {}) {
+  return {
+    configured: Boolean(payload.configured),
+    connected: Boolean(payload.connected),
+    profileName: payload.profileName || "",
+    profileImageUrl: payload.profileImageUrl || "",
+    playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
+    error: payload.error || "",
+    scopes: payload.scopes || "",
+  };
+}
+
+function normalizeSpotifyPlayerState(payload = {}) {
+  return {
+    connected: Boolean(payload.connected),
+    hasActiveDevice: Boolean(payload.hasActiveDevice),
+    isPlaying: Boolean(payload.isPlaying),
+    progressMs: Number.isFinite(Number(payload.progressMs)) ? Number(payload.progressMs) : 0,
+    deviceName: payload.deviceName || "",
+    deviceType: payload.deviceType || "",
+    deviceId: payload.deviceId || "",
+    track: payload.track || null,
+  };
+}
+
 function stopSyncPolling() {
   if (syncPollTimer) {
     window.clearInterval(syncPollTimer);
@@ -1329,6 +1537,26 @@ async function fetchSyncPayload(url, options = {}) {
   }
 }
 
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const responseText = await response.text();
+  let payload = {};
+  try {
+    payload = responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    payload = {};
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.error || "Request failed.");
+  }
+  return payload;
+}
+
+function isSpotifyRemoteSong(song = currentSong) {
+  return Boolean(song && song.source === "spotify");
+}
+
 function startSyncPolling() {
   stopSyncPolling();
   syncPollTimer = window.setInterval(() => {
@@ -1339,6 +1567,9 @@ function startSyncPolling() {
 }
 
 function setScreenMode(nextMode) {
+  if (nextMode !== "now-playing" || !isSpotifyRemoteSong()) {
+    stopSpotifyPlayerPolling();
+  }
   if (nextMode !== "library") {
     previousScreenMode = nextMode;
   }
@@ -1377,8 +1608,19 @@ function syncSelectButton() {
 }
 
 function syncPlaybackButton() {
-  playbackButton.disabled = screenMode === "sync" || screenMode === "photo-viewer" || screenMode === "game" || !currentSong;
-  playbackButton.classList.toggle("is-playing", Boolean(currentSong) && !previewAudio.paused);
+  const spotifyRemoteActive = isSpotifyRemoteSong();
+  const canUseSpotifyPlayback =
+    spotifyRemoteActive && spotifyViewState.connected && spotifyPlayerState.hasActiveDevice;
+  playbackButton.disabled =
+    screenMode === "sync" ||
+    screenMode === "photo-viewer" ||
+    screenMode === "game" ||
+    (!currentSong && !spotifyRemoteActive) ||
+    (spotifyRemoteActive && !canUseSpotifyPlayback);
+  playbackButton.classList.toggle(
+    "is-playing",
+    spotifyRemoteActive ? spotifyPlayerState.isPlaying : Boolean(currentSong) && !previewAudio.paused
+  );
 }
 
 function syncWheelButtons() {
@@ -1404,6 +1646,13 @@ function syncWheelButtons() {
   if (screenMode === "edit" && Boolean(getActiveUpload())) {
     rewindButton.disabled = false;
     forwardButton.disabled = false;
+    return;
+  }
+
+  if (isSpotifyRemoteSong()) {
+    const disableRemote = !spotifyViewState.connected || !spotifyPlayerState.hasActiveDevice;
+    rewindButton.disabled = disableRemote;
+    forwardButton.disabled = disableRemote;
     return;
   }
 
@@ -2283,10 +2532,29 @@ function renderPlayer() {
   playerTitle.textContent = currentSong.title || currentSong.fileName;
   playerArtist.textContent = currentSong.artist ? currentSong.artist : "Unknown Artist";
   playerAlbum.textContent = currentSong.album ? currentSong.album : "Unknown Album";
-  downloadNowButton.href = currentSong.downloadUrl;
-  downloadNowButton.setAttribute("download", currentSong.fileName);
-  downloadNowButton.removeAttribute("aria-disabled");
-  downloadNowButton.classList.remove("is-disabled");
+
+  if (isSpotifyRemoteSong(currentSong)) {
+    downloadNowButton.href = currentSong.spotifyUrl || "#";
+    downloadNowButton.textContent = currentSong.spotifyUrl ? "Open in Spotify" : "Spotify Track";
+    if (currentSong.spotifyUrl) {
+      downloadNowButton.removeAttribute("download");
+      downloadNowButton.removeAttribute("aria-disabled");
+      downloadNowButton.classList.remove("is-disabled");
+      downloadNowButton.setAttribute("target", "_blank");
+      downloadNowButton.setAttribute("rel", "noopener noreferrer");
+    } else {
+      downloadNowButton.setAttribute("aria-disabled", "true");
+      downloadNowButton.classList.add("is-disabled");
+    }
+  } else {
+    downloadNowButton.textContent = "Download Now";
+    downloadNowButton.href = currentSong.downloadUrl;
+    downloadNowButton.setAttribute("download", currentSong.fileName);
+    downloadNowButton.removeAttribute("aria-disabled");
+    downloadNowButton.classList.remove("is-disabled");
+    downloadNowButton.removeAttribute("target");
+    downloadNowButton.removeAttribute("rel");
+  }
 
   if (currentSong.artworkUrl) {
     playerArtwork.src = currentSong.artworkUrl;
@@ -2313,6 +2581,20 @@ function formatTime(seconds) {
 }
 
 function renderProgress() {
+  if (isSpotifyRemoteSong()) {
+    const duration = Number(currentSong?.durationSeconds || 0);
+    const currentTime = Math.max(0, spotifyPlayerState.progressMs / 1000);
+    const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+    const remaining = duration > 0 ? Math.max(0, duration - currentTime) : 0;
+
+    playerElapsed.textContent = formatTime(currentTime);
+    playerRemaining.textContent = spotifyPlayerState.hasActiveDevice
+      ? `-${formatTime(remaining)}`
+      : "No device";
+    playerProgressFill.style.width = `${progressPercent}%`;
+    return;
+  }
+
   const duration = Number.isFinite(previewAudio.duration) ? previewAudio.duration : 0;
   const currentTime = Number.isFinite(previewAudio.currentTime) ? previewAudio.currentTime : 0;
   const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
@@ -2348,8 +2630,62 @@ async function activateLibraryItem(itemData) {
   }
 
   if (itemData.type === "action" && itemData.id === "spotify-connect") {
-    setMessage("Spotify connect flow is the next step. The menu entry is in place.", "error");
+    try {
+      await connectSpotify();
+    } catch (error) {
+      setMessage(error.message, "error");
+      syncUi();
+    }
+    return;
+  }
+
+  if (itemData.type === "action" && itemData.id === "spotify-disconnect") {
+    try {
+      await disconnectSpotify();
+    } catch (error) {
+      setMessage(error.message, "error");
+      syncUi();
+    }
+    return;
+  }
+
+  if (itemData.type === "action" && itemData.id === "spotify-account") {
+    setMessage(
+      spotifyViewState.profileName
+        ? `Spotify Connected: ${spotifyViewState.profileName}`
+        : "Spotify Connected",
+      "success"
+    );
     syncUi();
+    return;
+  }
+
+  if (itemData.type === "action" && itemData.id === "spotify-now-playing") {
+    try {
+      await openSpotifyNowPlaying();
+      if (!spotifyPlayerState.hasActiveDevice) {
+        setMessage(
+          "No active Spotify device. Start playback in the Spotify app first, then use SwagPods as the remote.",
+          "error"
+        );
+      }
+    } catch (error) {
+      setMessage(error.message, "error");
+      syncUi();
+    }
+    return;
+  }
+
+  if (itemData.type === "action" && String(itemData.id || "").startsWith("spotify-playlist:")) {
+    const playlist = itemData.spotifyPlaylist || null;
+    if (playlist?.spotifyUrl) {
+      setMessage(
+        `Playlist loaded: ${playlist.name}. Next step is matching it to your local files.`,
+        "success"
+      );
+    } else {
+      setMessage("Spotify playlist loaded for local-library mapping.", "success");
+    }
     return;
   }
 
@@ -2468,8 +2804,14 @@ function renderLibrary() {
 function setCurrentSong(song) {
   currentSong = song;
   highlightedSongId = song ? song.id : "";
-  previewAudio.pause();
-  previewAudio.src = song ? song.playbackUrl : "";
+  if (!isSpotifyRemoteSong(song)) {
+    previewAudio.pause();
+    previewAudio.src = song ? song.playbackUrl : "";
+  } else {
+    previewAudio.pause();
+    previewAudio.removeAttribute("src");
+    previewAudio.load();
+  }
   renderPlayer();
   syncPlaybackButton();
 }
@@ -2567,8 +2909,152 @@ async function openSyncUtility() {
   startSyncPolling();
 }
 
+async function refreshSpotifyStatus() {
+  try {
+    const payload = await fetchJson("/api/spotify/status");
+    spotifyViewState = normalizeSpotifyViewState(payload);
+  } catch (error) {
+    spotifyViewState = normalizeSpotifyViewState({
+      configured: false,
+      connected: false,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
+async function connectSpotify() {
+  if (!spotifyViewState.configured) {
+    setMessage(
+      "Spotify is not configured on the server. Add SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI first.",
+      "error"
+    );
+    return;
+  }
+
+  const payload = await fetchJson("/api/spotify/connect", {
+    method: "POST",
+  });
+  if (!payload.authorizeUrl) {
+    throw new Error("Spotify authorize URL was not returned.");
+  }
+  window.location.assign(payload.authorizeUrl);
+}
+
+async function disconnectSpotify() {
+  await fetchJson("/api/spotify/disconnect", {
+    method: "POST",
+  });
+  stopSpotifyPlayerPolling();
+  spotifyPlayerState = normalizeSpotifyPlayerState();
+  if (isSpotifyRemoteSong()) {
+    setCurrentSong(null);
+    if (screenMode === "now-playing") {
+      screenMode = "library";
+    }
+  }
+  await refreshSpotifyStatus();
+  setMessage("Spotify disconnected.", "success");
+  if (getLibraryViewKey() === "spotify-library") {
+    libraryPath = ["main", "spotify"];
+    selectedIndex = 0;
+  }
+  syncUi();
+}
+
+async function refreshSpotifyPlayerState() {
+  const payload = await fetchJson("/api/spotify/player");
+  spotifyPlayerState = normalizeSpotifyPlayerState(payload);
+
+  if (spotifyPlayerState.track) {
+    const track = spotifyPlayerState.track;
+    const spotifySong = {
+      id: track.id || `spotify-${track.title || "track"}`,
+      fileName: "",
+      title: track.title || "Spotify Track",
+      artist: track.artist || "Spotify",
+      album: track.album || spotifyPlayerState.deviceName || "Spotify",
+      durationSeconds: Math.max(0, (Number(track.durationMs) || 0) / 1000),
+      playbackUrl: "",
+      downloadUrl: track.spotifyUrl || "#",
+      spotifyUrl: track.spotifyUrl || "",
+      artworkUrl: track.artworkUrl || null,
+      source: "spotify",
+    };
+    setCurrentSong(spotifySong);
+  } else if (isSpotifyRemoteSong()) {
+    setCurrentSong({
+      id: "spotify-no-track",
+      fileName: "",
+      title: spotifyPlayerState.hasActiveDevice ? "Nothing Playing" : "Open Spotify",
+      artist: spotifyPlayerState.deviceName || "No Active Device",
+      album: spotifyPlayerState.deviceType || "Spotify",
+      durationSeconds: 0,
+      playbackUrl: "",
+      downloadUrl: "#",
+      spotifyUrl: "",
+      artworkUrl: null,
+      source: "spotify",
+    });
+  }
+
+  syncUi();
+}
+
+function stopSpotifyPlayerPolling() {
+  if (spotifyPlayerPollTimer) {
+    window.clearInterval(spotifyPlayerPollTimer);
+    spotifyPlayerPollTimer = null;
+  }
+}
+
+function startSpotifyPlayerPolling() {
+  stopSpotifyPlayerPolling();
+  spotifyPlayerPollTimer = window.setInterval(() => {
+    if (screenMode === "now-playing" && isSpotifyRemoteSong()) {
+      void refreshSpotifyPlayerState().catch(() => {});
+    }
+  }, 3000);
+}
+
+async function openSpotifyNowPlaying() {
+  await refreshSpotifyPlayerState();
+  screenMode = "now-playing";
+  syncUi();
+  startSpotifyPlayerPolling();
+}
+
+async function sendSpotifyPlayerCommand(action) {
+  const payload = await fetchJson("/api/spotify/player/command", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ action }),
+  });
+  spotifyPlayerState = normalizeSpotifyPlayerState(payload);
+  if (spotifyPlayerState.track) {
+    const track = spotifyPlayerState.track;
+    setCurrentSong({
+      id: track.id || `spotify-${track.title || "track"}`,
+      fileName: "",
+      title: track.title || "Spotify Track",
+      artist: track.artist || "Spotify",
+      album: track.album || spotifyPlayerState.deviceName || "Spotify",
+      durationSeconds: Math.max(0, (Number(track.durationMs) || 0) / 1000),
+      playbackUrl: "",
+      downloadUrl: track.spotifyUrl || "#",
+      spotifyUrl: track.spotifyUrl || "",
+      artworkUrl: track.artworkUrl || null,
+      source: "spotify",
+    });
+  }
+  renderPlayer();
+  syncPlaybackButton();
+}
+
 function setMessage(text, kind = "success") {
-  if (!text || kind === "success") {
+  if (!text) {
     messageBox.innerHTML = "";
     return;
   }
@@ -2673,6 +3159,40 @@ async function loadPersistedLibrary() {
     librarySongs = Array.isArray(result.songs) ? result.songs.map(createSongRecord) : [];
     highlightedSongId = librarySongs[0]?.id || "";
     selectedIndex = 0;
+    syncUi();
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function loadSpotifyState() {
+  try {
+    await refreshSpotifyStatus();
+    if (spotifyViewState.connected) {
+      try {
+        await refreshSpotifyPlayerState();
+      } catch (error) {
+        spotifyPlayerState = normalizeSpotifyPlayerState();
+      }
+    } else {
+      spotifyPlayerState = normalizeSpotifyPlayerState();
+    }
+    if (window.APP_CONFIG?.spotifyAuthState === "connected" && spotifyViewState.connected) {
+      setMessage(
+        spotifyViewState.profileName
+          ? `Spotify Connected: ${spotifyViewState.profileName}`
+          : "Spotify Connected",
+        "success"
+      );
+    } else if (window.APP_CONFIG?.spotifyAuthError) {
+      setMessage(window.APP_CONFIG.spotifyAuthError, "error");
+    } else if (spotifyViewState.error) {
+      setMessage(spotifyViewState.error, "error");
+    }
+    if (window.APP_CONFIG?.spotifyAuthState || window.APP_CONFIG?.spotifyAuthError) {
+      const cleanUrl = `${window.location.origin}${window.location.pathname}`;
+      window.history.replaceState({}, document.title, cleanUrl);
+    }
     syncUi();
   } catch (error) {
     setMessage(error.message, "error");
@@ -2921,9 +3441,11 @@ menuButton.addEventListener("click", () => {
       libraryPath = ["main", "settings"];
     } else if (screenMode === "sync") {
       libraryPath = ["main"];
+      stopSpotifyPlayerPolling();
     } else {
       libraryPath = ["main"];
       selectedIndex = 0;
+      stopSpotifyPlayerPolling();
     }
     highlightedSongId = "";
     screenMode = "library";
@@ -2957,6 +3479,15 @@ rewindButton.addEventListener("click", async () => {
 
   if (screenMode === "edit" && getActiveUpload()) {
     cycleOptimizeFor(-1);
+    return;
+  }
+
+  if (isSpotifyRemoteSong()) {
+    try {
+      await sendSpotifyPlayerCommand("previous");
+    } catch (error) {
+      setMessage(error.message, "error");
+    }
     return;
   }
 
@@ -2999,6 +3530,15 @@ forwardButton.addEventListener("click", async () => {
 
   if (screenMode === "edit" && getActiveUpload()) {
     cycleOptimizeFor(1);
+    return;
+  }
+
+  if (isSpotifyRemoteSong()) {
+    try {
+      await sendSpotifyPlayerCommand("next");
+    } catch (error) {
+      setMessage(error.message, "error");
+    }
     return;
   }
 
@@ -3054,18 +3594,19 @@ ipodScreen.addEventListener(
     }
 
     event.preventDefault();
-    const SCROLL_STEP_DELTA = 28;
-    screenScrollAccumulator += event.deltaY;
+    handleWheelScrollDelta(event.deltaY);
+  },
+  { passive: false }
+);
 
-    while (screenScrollAccumulator >= SCROLL_STEP_DELTA) {
-      moveLibrarySelection(1, "wheel");
-      screenScrollAccumulator -= SCROLL_STEP_DELTA;
+clickWheel.addEventListener(
+  "wheel",
+  (event) => {
+    if (!handleWheelScrollDelta(event.deltaY)) {
+      return;
     }
-
-    while (screenScrollAccumulator <= -SCROLL_STEP_DELTA) {
-      moveLibrarySelection(-1, "wheel");
-      screenScrollAccumulator += SCROLL_STEP_DELTA;
-    }
+    event.preventDefault();
+    event.stopPropagation();
   },
   { passive: false }
 );
@@ -3088,8 +3629,10 @@ clickWheel.addEventListener("pointerdown", (event) => {
   }
 
   haptics.prime();
+  const profile = getWheelPointerProfile(event.pointerType);
   wheelDrag = {
     pointerId: event.pointerId,
+    profile,
     lastAngle: position.angle,
     lastRadius: position.normalizedRadius,
     lastTimestamp: event.timeStamp || performance.now(),
@@ -3129,16 +3672,18 @@ clickWheel.addEventListener("pointermove", (event) => {
     return;
   }
 
-  if (Math.abs(delta) > WHEEL_MAX_DELTA) {
-    delta = Math.sign(delta) * WHEEL_MAX_DELTA;
+  const profile = wheelDrag.profile || WHEEL_POINTER_PROFILES.coarse;
+
+  if (Math.abs(delta) > profile.maxDelta) {
+    delta = Math.sign(delta) * profile.maxDelta;
   }
 
-  if (radialDrift > WHEEL_RADIAL_DRIFT_LIMIT && Math.abs(delta) < WHEEL_DETENT_ANGLE * 0.7) {
+  if (radialDrift > profile.radialDriftLimit && Math.abs(delta) < profile.detentAngle * 0.7) {
     event.preventDefault();
     return;
   }
 
-  if (Math.abs(delta) < WHEEL_MIN_DELTA) {
+  if (Math.abs(delta) < profile.minDelta) {
     event.preventDefault();
     return;
   }
@@ -3146,23 +3691,23 @@ clickWheel.addEventListener("pointermove", (event) => {
   if (
     wheelDrag.direction !== 0 &&
     Math.sign(delta) !== wheelDrag.direction &&
-    Math.abs(delta) < WHEEL_DIRECTION_LOCK_ANGLE &&
-    Math.abs(wheelDrag.detentAccumulator) > WHEEL_DETENT_ANGLE * 0.24
+    Math.abs(delta) < profile.directionLockAngle &&
+    Math.abs(wheelDrag.detentAccumulator) > profile.detentAngle * 0.24
   ) {
     event.preventDefault();
     return;
   }
 
   wheelDrag.smoothedDelta =
-    wheelDrag.smoothedDelta * WHEEL_DELTA_SMOOTHING +
-    delta * (1 - WHEEL_DELTA_SMOOTHING);
+    wheelDrag.smoothedDelta * profile.smoothing +
+    delta * (1 - profile.smoothing);
   wheelDrag.direction = Math.sign(wheelDrag.smoothedDelta) || wheelDrag.direction;
   wheelDrag.smoothedVelocity =
     wheelDrag.smoothedVelocity * 0.72 +
     (wheelDrag.smoothedDelta / deltaTime) * 0.28;
   const accelerationBoost = 1 + Math.min(
-    WHEEL_ACCELERATION_CAP,
-    Math.max(0, Math.abs(wheelDrag.smoothedVelocity) - WHEEL_ACCELERATION_START) * WHEEL_ACCELERATION_FACTOR
+    profile.accelCap,
+    Math.max(0, Math.abs(wheelDrag.smoothedVelocity) - profile.accelStart) * profile.accelFactor
   );
   wheelDrag.pendingDelta += wheelDrag.smoothedDelta * accelerationBoost;
   scheduleWheelFrame();
@@ -3185,6 +3730,9 @@ clickWheel.addEventListener("pointermove", (event) => {
     haptics.prime();
   });
 });
+
+[menuButton, rewindButton, forwardButton, playbackButton].forEach(bindWheelSectorHighlight);
+bindCenterButtonHighlight(selectButton);
 
 metadataForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -3319,6 +3867,14 @@ playbackButton.addEventListener("click", async () => {
 
   haptics.prime();
   haptics.transport();
+  if (isSpotifyRemoteSong()) {
+    try {
+      await sendSpotifyPlayerCommand(spotifyPlayerState.isPlaying ? "pause" : "play");
+    } catch (error) {
+      setMessage(error.message, "error");
+    }
+    return;
+  }
   if (!previewAudio.src) {
     previewAudio.src = currentSong.playbackUrl;
   }
@@ -3361,3 +3917,4 @@ renderPlayer();
 loadPersistedPhotos();
 syncUi();
 void loadPersistedLibrary();
+void loadSpotifyState();

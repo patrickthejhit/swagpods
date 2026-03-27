@@ -218,3 +218,75 @@ For a small test batch before committing to a full re-encode:
 ```bash
 ./scripts/recompress_ipod_library.sh --quality compact --limit 10
 ```
+
+## Spotify Playlist -> Local Library Pipeline
+
+This repo now includes a metadata-only Spotify pipeline:
+
+- Reads a Spotify playlist through the Spotify Web API
+- Exports playlist metadata to local JSON
+- Matches Spotify tracks to files already on your external SSD
+- Repairs tags for matched files
+- Stages results into:
+  - `READY_FOR_IMPORT`
+  - `REVIEW_REQUIRED`
+  - `MISSING_FROM_LIBRARY`
+
+Important:
+- It does **not** download Spotify audio
+- It uses Spotify only for metadata and playlist structure
+- Reports keep Spotify URLs so the data can link back to Spotify
+
+Run it like this:
+
+```bash
+python3 scripts/spotify_playlist_local_library_pipeline.py \
+  "https://open.spotify.com/playlist/YOUR_PLAYLIST_ID" \
+  --spotify-client-id "$SPOTIFY_CLIENT_ID" \
+  --library-root "/Volumes/4 tb backup/MUSIC" \
+  --output-root "/Volumes/4 tb backup/codex ipod ready 500gb/spotify_playlist_pipeline" \
+  --final-import-root "/Volumes/4 tb backup/codex ipod ready 500gb/music/READY_FOR_IMPORT"
+```
+
+Useful flags:
+- `--embed-artwork`: embed Spotify cover art into staged matched files
+- `--transfer-mode copy|move|hardlink|symlink`: control how staged files are materialized
+- `--duplicate-check-root /path/to/library`: scan extra libraries before import
+- `--dry-run`: build the report without modifying or staging files
+
+Outputs:
+- `playlist_metadata.json`: playlist structure and Spotify metadata
+- `reports/pipeline_report.json`: full matching, duplicate, and staging report
+
+## Spotify Connection Setup
+
+1. Create a Spotify app:
+   Use the Spotify Developer Dashboard at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and create an app for SwagPods.
+
+2. Add the redirect URI:
+   In your Spotify app settings, add the exact callback URL used by this app.
+   Local example:
+   `http://127.0.0.1:5001/spotify/callback`
+   Render example:
+   `https://swagpods.onrender.com/spotify/callback`
+
+3. Set these environment variables:
+   - `SPOTIFY_CLIENT_ID`
+   - `SPOTIFY_REDIRECT_URI`
+   - `SPOTIFY_SCOPES`
+   - `FLASK_SECRET_KEY`
+
+   Example scopes for playlist read + remote control:
+   `playlist-read-private playlist-read-collaborative user-read-playback-state user-read-currently-playing user-modify-playback-state`
+
+4. Test locally:
+   Start the app, open the site, go to `Spotify` in the emulator, and select `Connect Spotify`.
+   Spotify should prompt for sign-in and consent, then return to your site and show:
+   - `Spotify Connected`
+   - your Spotify profile name
+   - your playlists
+   - `Now Playing` remote controls
+
+Notes:
+- Spotify playback control works only against an active Spotify playback device.
+- In practice, the user should start playback in the Spotify app first, then use SwagPods as the remote.

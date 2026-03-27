@@ -478,6 +478,8 @@
     <script>
       window.APP_CONFIG = {
         exportDir: {{ export_dir | tojson }},
+        spotifyAuthState: {{ spotify_auth_state | tojson }},
+        spotifyAuthError: {{ spotify_auth_error | tojson }},
       };
     </script>
     <script src="{{ url_for('static', filename='app.js', v=asset_version) }}"></script>
