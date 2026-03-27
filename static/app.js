@@ -2896,6 +2896,9 @@ async function activateLibraryItem(itemData) {
     if (itemData.id === "spotify") {
       try {
         await refreshSpotifyStatus();
+        if (spotifyViewState.connected && spotifyLibraryData.playlists.length === 0) {
+          await refreshSpotifyLibrary();
+        }
       } catch (error) {
         setMessage(error.message, "error");
         syncUi();
@@ -3721,6 +3724,12 @@ async function loadSpotifyState() {
       );
       libraryPath = ["main", "music", "spotify"];
       selectedIndex = 0;
+      screenMode = "library";
+      await refreshSpotifyLibrary();
+    } else if (window.APP_CONFIG?.spotifyAuthState === "connected" && !spotifyViewState.connected) {
+      window.setTimeout(() => {
+        void loadSpotifyState();
+      }, 600);
     } else if (window.APP_CONFIG?.spotifyAuthError) {
       setMessage(window.APP_CONFIG.spotifyAuthError, "error");
     } else if (spotifyViewState.error) {
