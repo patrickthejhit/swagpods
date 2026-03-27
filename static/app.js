@@ -3251,11 +3251,11 @@ async function refreshSpotifyPlayerState() {
     setCurrentSong({
       id: "spotify-no-track",
       fileName: "",
-      title: "Press Play",
+      title: "Click Play To Start",
       artist: "Spotify",
       album: spotifyPlayerState.hasActiveDevice
-        ? "Use the play button to start music."
-        : "Use the play button to start Spotify playback.",
+        ? "Click play to start."
+        : "Click play to start.",
       durationSeconds: 0,
       playbackUrl: "",
       downloadUrl: "#",
