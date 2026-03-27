@@ -288,5 +288,5 @@ Outputs:
    - `Now Playing` remote controls
 
 Notes:
-- Spotify playback control works only against an active Spotify playback device.
-- In practice, the user should start playback in the Spotify app first, then use SwagPods as the remote.
+- SwagPods now initializes Spotify Web Playback SDK in the browser so the web app can become the playback device.
+- Spotify playback still depends on Spotify account/device restrictions and may require Spotify Premium.

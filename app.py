@@ -692,6 +692,7 @@ def get_spotify_status_payload() -> dict[str, object]:
     status["profileName"] = str(profile.get("display_name") or profile.get("id") or "Spotify User").strip()
     status["profileImageUrl"] = image_url
     status["playlists"] = playlists
+    status["webPlaybackSupported"] = True
     return status
 
 
@@ -1731,29 +1732,44 @@ def get_spotify_player():
         return jsonify({"error": str(error)}), 400
 
 
+@app.get("/api/spotify/web-playback-token")
+def get_spotify_web_playback_token():
+    ensure_directories()
+    try:
+        access_token = get_valid_spotify_access_token()
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify({"accessToken": access_token})
+
+
 @app.post("/api/spotify/player/command")
 def spotify_player_command():
     ensure_directories()
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action", "")).strip().lower()
     access_token = get_valid_spotify_access_token()
+    device_id = str(payload.get("deviceId", "")).strip()
 
     try:
         if action == "play":
-            spotify_api_request(access_token, "PUT", "/me/player/play")
+            params = {"device_id": device_id} if device_id else None
+            spotify_api_request(access_token, "PUT", "/me/player/play", params=params)
         elif action == "pause":
-            spotify_api_request(access_token, "PUT", "/me/player/pause")
+            params = {"device_id": device_id} if device_id else None
+            spotify_api_request(access_token, "PUT", "/me/player/pause", params=params)
         elif action == "next":
-            spotify_api_request(access_token, "POST", "/me/player/next")
+            params = {"device_id": device_id} if device_id else None
+            spotify_api_request(access_token, "POST", "/me/player/next", params=params)
         elif action == "previous":
-            spotify_api_request(access_token, "POST", "/me/player/previous")
+            params = {"device_id": device_id} if device_id else None
+            spotify_api_request(access_token, "POST", "/me/player/previous", params=params)
         elif action == "play-track":
             track_uri = str(payload.get("trackUri", "")).strip()
             context_uri = str(payload.get("contextUri", "")).strip()
             position_ms = int(payload.get("positionMs", 0) or 0)
             if not track_uri:
                 return jsonify({"error": "Missing Spotify track URI."}), 400
-            device_id = ensure_spotify_target_device(access_token)
+            target_device_id = device_id or ensure_spotify_target_device(access_token)
             body: dict[str, object]
             if context_uri:
                 body = {"context_uri": context_uri, "offset": {"uri": track_uri}}
@@ -1761,7 +1777,7 @@ def spotify_player_command():
                 body = {"uris": [track_uri]}
             if position_ms > 0:
                 body["position_ms"] = position_ms
-            spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": device_id}, body=body)
+            spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": target_device_id}, body=body)
         else:
             return jsonify({"error": "Unsupported Spotify player command."}), 400
     except RuntimeError as error:

@@ -324,6 +324,10 @@ let spotifyLibraryData = {
   albumDetails: {},
   artistDetails: {},
 };
+let spotifySdkPlayer = null;
+let spotifySdkDeviceId = "";
+let spotifySdkReady = false;
+let spotifySdkInitPromise = null;
 
 const haptics = (() => {
   const lastFireTimes = new Map();
@@ -1695,6 +1699,18 @@ async function fetchJson(url, options = {}) {
 
 function isSpotifyRemoteSong(song = currentSong) {
   return Boolean(song && song.source === "spotify");
+}
+
+async function getSpotifyWebPlaybackToken() {
+  const payload = await fetchJson("/api/spotify/web-playback-token");
+  if (!payload.accessToken) {
+    throw new Error("Spotify playback token was not returned.");
+  }
+  return payload.accessToken;
+}
+
+function isSpotifySdkAvailable() {
+  return typeof window !== "undefined" && Boolean(window.Spotify);
 }
 
 function isSpotifyLibraryPath(value) {
@@ -3154,6 +3170,114 @@ async function refreshSpotifyStatus() {
   }
 }
 
+async function initializeSpotifySdk() {
+  if (!spotifyViewState.connected) {
+    return;
+  }
+  if (spotifySdkReady && spotifySdkPlayer && spotifySdkDeviceId) {
+    return;
+  }
+  if (spotifySdkInitPromise) {
+    return spotifySdkInitPromise;
+  }
+
+  spotifySdkInitPromise = new Promise((resolve, reject) => {
+    const startPlayer = () => {
+      if (!isSpotifySdkAvailable()) {
+        reject(new Error("Spotify browser playback is not available in this browser."));
+        return;
+      }
+
+      if (spotifySdkPlayer) {
+        resolve();
+        return;
+      }
+
+      const player = new window.Spotify.Player({
+        name: "SwagPods Web Player",
+        getOAuthToken: async (callback) => {
+          try {
+            const token = await getSpotifyWebPlaybackToken();
+            callback(token);
+          } catch (error) {
+            setMessage(error.message, "error");
+          }
+        },
+        volume: 0.8,
+      });
+
+      player.addListener("ready", ({ device_id }) => {
+        spotifySdkDeviceId = device_id;
+        spotifySdkReady = true;
+        resolve();
+      });
+      player.addListener("not_ready", () => {
+        spotifySdkReady = false;
+      });
+      player.addListener("initialization_error", ({ message }) => reject(new Error(message)));
+      player.addListener("authentication_error", ({ message }) => reject(new Error(message)));
+      player.addListener("account_error", ({ message }) => reject(new Error(message)));
+      player.addListener("playback_error", ({ message }) => reject(new Error(message)));
+      player.addListener("player_state_changed", (state) => {
+        if (!state || !state.track_window?.current_track) {
+          return;
+        }
+        const currentTrack = state.track_window.current_track;
+        spotifyPlayerState = {
+          ...spotifyPlayerState,
+          connected: true,
+          hasActiveDevice: true,
+          isPlaying: !state.paused,
+          progressMs: Number(state.position || 0),
+          deviceName: "SwagPods Web Player",
+          deviceType: "Web",
+          deviceId: spotifySdkDeviceId,
+          track: {
+            id: currentTrack.id || "",
+            title: currentTrack.name || "Spotify Track",
+            artist: Array.isArray(currentTrack.artists)
+              ? currentTrack.artists.map((artist) => artist.name).filter(Boolean).join(", ")
+              : "Spotify",
+            album: currentTrack.album?.name || "Spotify",
+            durationMs: Number(currentTrack.duration_ms || 0),
+            artworkUrl: currentTrack.album?.images?.[0]?.url || "",
+            spotifyUrl: "",
+            uri: currentTrack.uri || "",
+          },
+        };
+        if (screenMode === "now-playing") {
+          void refreshSpotifyPlayerState().catch(() => {});
+        }
+      });
+
+      player.connect().then((connected) => {
+        if (!connected) {
+          reject(new Error("Spotify browser playback could not connect."));
+          return;
+        }
+        spotifySdkPlayer = player;
+      }).catch((error) => reject(new Error(error.message || "Spotify browser playback failed to connect.")));
+    };
+
+    if (isSpotifySdkAvailable()) {
+      startPlayer();
+      return;
+    }
+
+    const previousHandler = window.onSpotifyWebPlaybackSDKReady;
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      if (typeof previousHandler === "function") {
+        previousHandler();
+      }
+      startPlayer();
+    };
+  }).finally(() => {
+    spotifySdkInitPromise = null;
+  });
+
+  return spotifySdkInitPromise;
+}
+
 async function refreshSpotifyLibrary() {
   const payload = await fetchJson("/api/spotify/library");
   spotifyLibraryData = {
@@ -3313,12 +3437,19 @@ async function openSpotifyNowPlaying() {
 }
 
 async function sendSpotifyPlayerCommand(action) {
+  await initializeSpotifySdk();
+  if (spotifySdkPlayer && typeof spotifySdkPlayer.activateElement === "function" && action === "play") {
+    await spotifySdkPlayer.activateElement();
+  }
   const payload = await fetchJson("/api/spotify/player/command", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({
+      action,
+      deviceId: spotifySdkDeviceId,
+    }),
   });
   spotifyPlayerState = normalizeSpotifyPlayerState(payload);
   if (spotifyPlayerState.track) {
@@ -3345,6 +3476,10 @@ async function playSpotifyTrack(track, contextUri = "") {
   if (!track?.uri) {
     throw new Error("Spotify track URI is missing.");
   }
+  await initializeSpotifySdk();
+  if (spotifySdkPlayer && typeof spotifySdkPlayer.activateElement === "function") {
+    await spotifySdkPlayer.activateElement();
+  }
   const payload = await fetchJson("/api/spotify/player/command", {
     method: "POST",
     headers: {
@@ -3354,6 +3489,7 @@ async function playSpotifyTrack(track, contextUri = "") {
       action: "play-track",
       trackUri: track.uri,
       contextUri,
+      deviceId: spotifySdkDeviceId,
     }),
   });
   spotifyPlayerState = normalizeSpotifyPlayerState(payload);
@@ -3427,9 +3563,9 @@ function showSpotifyPlaybackHelp(message) {
   currentSong = {
     id: "spotify-help",
     fileName: "",
-    title: "Open Spotify App",
-    artist: "No Active Device",
-    album: message || "Start a song in Spotify first, then press play here.",
+    title: "Click Play To Start",
+    artist: "Spotify",
+    album: message || "Click play to start.",
     durationSeconds: 0,
     playbackUrl: "",
     downloadUrl: "#",
@@ -3556,6 +3692,13 @@ async function loadPersistedLibrary() {
 async function loadSpotifyState() {
   try {
     await refreshSpotifyStatus();
+    if (spotifyViewState.connected) {
+      try {
+        await initializeSpotifySdk();
+      } catch (error) {
+        setMessage(error.message, "error");
+      }
+    }
     if (spotifyViewState.connected) {
       try {
         await refreshSpotifyPlayerState();
