@@ -1762,14 +1762,16 @@ function syncSelectButton() {
 
 function syncPlaybackButton() {
   const spotifyRemoteActive = isSpotifyRemoteSong();
+  const spotifyNowPlayingReady =
+    screenMode === "now-playing" && spotifyViewState.connected;
   const canUseSpotifyPlayback =
-    spotifyRemoteActive && spotifyViewState.connected;
+    (spotifyRemoteActive && spotifyViewState.connected) || spotifyNowPlayingReady;
   playbackButton.disabled =
     screenMode === "sync" ||
     screenMode === "photo-viewer" ||
     screenMode === "game" ||
-    (!currentSong && !spotifyRemoteActive) ||
-    (spotifyRemoteActive && !canUseSpotifyPlayback);
+    (!currentSong && !spotifyNowPlayingReady && !spotifyRemoteActive) ||
+    ((spotifyRemoteActive || spotifyNowPlayingReady) && !canUseSpotifyPlayback);
   playbackButton.classList.toggle(
     "is-playing",
     spotifyRemoteActive ? spotifyPlayerState.isPlaying : Boolean(currentSong) && !previewAudio.paused
