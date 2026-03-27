@@ -598,6 +598,60 @@ def fetch_spotify_player_state_payload() -> dict[str, object]:
     }
 
 
+def fetch_spotify_devices_payload() -> list[dict[str, object]]:
+    access_token = get_valid_spotify_access_token()
+    payload = spotify_api_get(access_token, "/me/player/devices")
+    devices: list[dict[str, object]] = []
+    for item in payload.get("devices", []):
+        if not isinstance(item, dict):
+            continue
+        devices.append(
+            {
+                "id": str(item.get("id", "")).strip(),
+                "isActive": bool(item.get("is_active")),
+                "isRestricted": bool(item.get("is_restricted")),
+                "name": str(item.get("name", "")).strip(),
+                "type": str(item.get("type", "")).strip(),
+            }
+        )
+    return devices
+
+
+def ensure_spotify_target_device(access_token: str) -> str:
+    devices_payload = spotify_api_get(access_token, "/me/player/devices")
+    devices = [item for item in devices_payload.get("devices", []) if isinstance(item, dict)]
+    available = [
+        item
+        for item in devices
+        if str(item.get("id", "")).strip() and not bool(item.get("is_restricted"))
+    ]
+    if not available:
+        raise RuntimeError(
+            "No available Spotify device was found. Open Spotify on your phone, desktop, or browser first."
+        )
+
+    active = next((item for item in available if bool(item.get("is_active"))), None)
+    if active:
+        return str(active.get("id", "")).strip()
+
+    preferred = next(
+        (
+            item
+            for item in available
+            if str(item.get("type", "")).strip().lower() in {"computer", "smartphone"}
+        ),
+        available[0],
+    )
+    device_id = str(preferred.get("id", "")).strip()
+    spotify_api_request(
+        access_token,
+        "PUT",
+        "/me/player",
+        body={"device_ids": [device_id], "play": True},
+    )
+    return device_id
+
+
 def get_spotify_status_payload() -> dict[str, object]:
     config = get_spotify_oauth_config()
     status: dict[str, object] = {
@@ -1699,12 +1753,15 @@ def spotify_player_command():
             position_ms = int(payload.get("positionMs", 0) or 0)
             if not track_uri:
                 return jsonify({"error": "Missing Spotify track URI."}), 400
-            body: dict[str, object] = {"offset": {"uri": track_uri}}
+            device_id = ensure_spotify_target_device(access_token)
+            body: dict[str, object]
             if context_uri:
-                body["context_uri"] = context_uri
+                body = {"context_uri": context_uri, "offset": {"uri": track_uri}}
+            else:
+                body = {"uris": [track_uri]}
             if position_ms > 0:
                 body["position_ms"] = position_ms
-            spotify_api_request(access_token, "PUT", "/me/player/play", body=body)
+            spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": device_id}, body=body)
         else:
             return jsonify({"error": "Unsupported Spotify player command."}), 400
     except RuntimeError as error:

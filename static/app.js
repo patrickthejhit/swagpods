@@ -1763,7 +1763,7 @@ function syncSelectButton() {
 function syncPlaybackButton() {
   const spotifyRemoteActive = isSpotifyRemoteSong();
   const canUseSpotifyPlayback =
-    spotifyRemoteActive && spotifyViewState.connected && spotifyPlayerState.hasActiveDevice;
+    spotifyRemoteActive && spotifyViewState.connected;
   playbackButton.disabled =
     screenMode === "sync" ||
     screenMode === "photo-viewer" ||
@@ -1803,7 +1803,7 @@ function syncWheelButtons() {
   }
 
   if (isSpotifyRemoteSong()) {
-    const disableRemote = !spotifyViewState.connected || !spotifyPlayerState.hasActiveDevice;
+    const disableRemote = !spotifyViewState.connected;
     rewindButton.disabled = disableRemote;
     forwardButton.disabled = disableRemote;
     return;
@@ -4189,7 +4189,11 @@ playbackButton.addEventListener("click", async () => {
   haptics.transport();
   if (isSpotifyRemoteSong()) {
     try {
-      await sendSpotifyPlayerCommand(spotifyPlayerState.isPlaying ? "pause" : "play");
+      if (!spotifyPlayerState.track || currentSong?.id === "spotify-no-track") {
+        await shuffleMusicSources();
+      } else {
+        await sendSpotifyPlayerCommand(spotifyPlayerState.isPlaying ? "pause" : "play");
+      }
     } catch (error) {
       setMessage(error.message, "error");
     }
