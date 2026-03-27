@@ -1068,7 +1068,7 @@ function getLibraryState() {
               {
                 type: "action",
                 id: "spotify-account",
-                title: "Spotify Connected",
+                title: "Connect Spotify",
                 meta: spotifyViewState.profileName || "Connected",
               },
               {
