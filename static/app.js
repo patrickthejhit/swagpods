@@ -3394,6 +3394,53 @@ async function shuffleMusicSources() {
   await playSongAtIndex(songIndex);
 }
 
+async function startSpotifyPlaybackFromEmptyState() {
+  if (!spotifyViewState.connected) {
+    throw new Error("Connect Spotify first.");
+  }
+
+  if (spotifyLibraryData.tracks.length === 0) {
+    await refreshSpotifyLibrary();
+  }
+
+  if (spotifyLibraryData.tracks.length > 0) {
+    const track = shuffleArray(spotifyLibraryData.tracks)[0];
+    await playSpotifyTrack(track);
+    return;
+  }
+
+  const firstPlaylist = spotifyLibraryData.playlists[0] || null;
+  if (firstPlaylist?.id) {
+    await ensureSpotifyPlaylistDetail(firstPlaylist.id);
+    const playlistTracks = spotifyLibraryData.playlistDetails[firstPlaylist.id]?.tracks || [];
+    if (playlistTracks.length > 0) {
+      const track = shuffleArray(playlistTracks)[0];
+      await playSpotifyTrack(track, spotifyLibraryData.playlistDetails[firstPlaylist.id]?.uri || "");
+      return;
+    }
+  }
+
+  throw new Error("No Spotify tracks were found in your saved songs or playlists.");
+}
+
+function showSpotifyPlaybackHelp(message) {
+  currentSong = {
+    id: "spotify-help",
+    fileName: "",
+    title: "Open Spotify App",
+    artist: "No Active Device",
+    album: message || "Start a song in Spotify first, then press play here.",
+    durationSeconds: 0,
+    playbackUrl: "",
+    downloadUrl: "#",
+    spotifyUrl: "",
+    artworkUrl: null,
+    source: "spotify",
+  };
+  renderPlayer();
+  syncPlaybackButton();
+}
+
 function setMessage(text, kind = "success") {
   if (!text) {
     messageBox.innerHTML = "";
@@ -4206,8 +4253,11 @@ playbackButton.addEventListener("click", async () => {
   haptics.transport();
   if (!currentSong && screenMode === "now-playing" && spotifyViewState.connected) {
     try {
-      await shuffleMusicSources();
+      await startSpotifyPlaybackFromEmptyState();
     } catch (error) {
+      if (String(error.message || "").toLowerCase().includes("no available spotify device")) {
+        showSpotifyPlaybackHelp("Start a song in Spotify first, then press play here.");
+      }
       setMessage(error.message, "error");
     }
     return;
@@ -4220,11 +4270,14 @@ playbackButton.addEventListener("click", async () => {
   if (isSpotifyRemoteSong()) {
     try {
       if (!spotifyPlayerState.track || currentSong?.id === "spotify-no-track") {
-        await shuffleMusicSources();
+        await startSpotifyPlaybackFromEmptyState();
       } else {
         await sendSpotifyPlayerCommand(spotifyPlayerState.isPlaying ? "pause" : "play");
       }
     } catch (error) {
+      if (String(error.message || "").toLowerCase().includes("no available spotify device")) {
+        showSpotifyPlaybackHelp("Start a song in Spotify first, then press play here.");
+      }
       setMessage(error.message, "error");
     }
     return;
