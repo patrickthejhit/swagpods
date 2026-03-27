@@ -276,8 +276,8 @@ Outputs:
    - `SPOTIFY_SCOPES`
    - `FLASK_SECRET_KEY`
 
-   Example scopes for playlist read + remote control:
-   `playlist-read-private playlist-read-collaborative user-read-playback-state user-read-currently-playing user-modify-playback-state`
+   Example scopes for playlist/library read + remote control:
+   `playlist-read-private playlist-read-collaborative user-library-read user-read-playback-state user-read-currently-playing user-modify-playback-state`
 
 4. Test locally:
    Start the app, open the site, go to `Spotify` in the emulator, and select `Connect Spotify`.

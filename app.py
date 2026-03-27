@@ -49,6 +49,7 @@ SPOTIFY_DEFAULT_CLIENT_ID = "1fd5039188e3488b940933da79591fe1"
 SPOTIFY_DEFAULT_SCOPES = (
     "playlist-read-private "
     "playlist-read-collaborative "
+    "user-library-read "
     "user-read-playback-state "
     "user-read-currently-playing "
     "user-modify-playback-state"
@@ -365,6 +366,181 @@ def fetch_spotify_profile_and_playlists() -> tuple[dict[str, object], list[dict[
     return profile, playlists
 
 
+def paginate_spotify_items(access_token: str, initial_url: str) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    next_url = initial_url
+    while next_url:
+        payload = spotify_api_get(access_token, next_url)
+        for item in payload.get("items", []):
+            if isinstance(item, dict):
+                items.append(item)
+        next_url = str(payload.get("next") or "")
+    return items
+
+
+def build_spotify_album_payload(album: dict[str, object]) -> dict[str, object]:
+    artist_names: list[str] = []
+    for artist in album.get("artists") or []:
+        if isinstance(artist, dict):
+            name = str(artist.get("name", "")).strip()
+            if name:
+                artist_names.append(name)
+
+    artwork_url = ""
+    for image in album.get("images") or []:
+        if isinstance(image, dict):
+            maybe_url = str(image.get("url", "")).strip()
+            if maybe_url:
+                artwork_url = maybe_url
+                break
+
+    return {
+        "id": str(album.get("id", "")).strip(),
+        "name": str(album.get("name", "")).strip() or "Untitled Album",
+        "artist": ", ".join(artist_names),
+        "trackCount": int(album.get("total_tracks", 0) or 0),
+        "spotifyUrl": str(((album.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "artworkUrl": artwork_url,
+        "uri": str(album.get("uri", "")).strip(),
+    }
+
+
+def build_spotify_artist_payload(artist: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(artist.get("id", "")).strip(),
+        "name": str(artist.get("name", "")).strip() or "Unknown Artist",
+        "spotifyUrl": str(((artist.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "uri": str(artist.get("uri", "")).strip(),
+    }
+
+
+def build_spotify_playlist_payload(item: dict[str, object]) -> dict[str, object]:
+    owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+    images = item.get("images") if isinstance(item.get("images"), list) else []
+    artwork_url = ""
+    for image in images:
+        if isinstance(image, dict):
+            maybe_url = str(image.get("url", "")).strip()
+            if maybe_url:
+                artwork_url = maybe_url
+                break
+    return {
+        "id": str(item.get("id", "")).strip(),
+        "name": str(item.get("name", "")).strip() or "Untitled Playlist",
+        "trackCount": int(((item.get("tracks") or {}).get("total")) or 0),
+        "spotifyUrl": str(((item.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "ownerName": str(owner.get("display_name") or owner.get("id") or "").strip(),
+        "artworkUrl": artwork_url,
+        "uri": str(item.get("uri", "")).strip(),
+    }
+
+
+def fetch_spotify_library_sections() -> dict[str, object]:
+    access_token = get_valid_spotify_access_token()
+    profile, playlists = fetch_spotify_profile_and_playlists()
+
+    album_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/albums?limit=50")
+    saved_track_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/tracks?limit=50")
+
+    albums = [
+        build_spotify_album_payload(item["album"])
+        for item in album_items
+        if isinstance(item.get("album"), dict)
+    ]
+    tracks = [
+        build_spotify_track_payload(item["track"])
+        for item in saved_track_items
+        if isinstance(item.get("track"), dict)
+    ]
+
+    artist_index: dict[str, dict[str, object]] = {}
+    for album_item in album_items:
+        album = album_item.get("album")
+        if not isinstance(album, dict):
+            continue
+        for artist in album.get("artists") or []:
+            if not isinstance(artist, dict):
+                continue
+            artist_id = str(artist.get("id", "")).strip()
+            if not artist_id or artist_id in artist_index:
+                continue
+            artist_index[artist_id] = build_spotify_artist_payload(artist)
+
+    return {
+        "profileName": str(profile.get("display_name") or profile.get("id") or "Spotify User").strip(),
+        "playlists": playlists,
+        "albums": albums,
+        "artists": sorted(artist_index.values(), key=lambda item: str(item["name"]).lower()),
+        "tracks": tracks,
+    }
+
+
+def fetch_spotify_playlist_tracks(playlist_id: str) -> dict[str, object]:
+    access_token = get_valid_spotify_access_token()
+    details = spotify_api_get(access_token, f"/playlists/{playlist_id}")
+    items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/tracks?limit=100")
+    tracks = [
+        build_spotify_track_payload(item["track"])
+        for item in items
+        if isinstance(item.get("track"), dict)
+    ]
+    return {
+        "id": playlist_id,
+        "name": str(details.get("name", "")).strip() or "Playlist",
+        "spotifyUrl": str(((details.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "tracks": tracks,
+        "uri": str(details.get("uri", "")).strip(),
+    }
+
+
+def fetch_spotify_album_tracks(album_id: str) -> dict[str, object]:
+    access_token = get_valid_spotify_access_token()
+    album = spotify_api_get(access_token, f"/albums/{album_id}")
+    tracks = [
+        {
+            **build_spotify_track_payload({**track, "album": album}),
+            "uri": str(track.get("uri", "")).strip(),
+        }
+        for track in ((album.get("tracks") or {}).get("items") or [])
+        if isinstance(track, dict)
+    ]
+    return {
+        "id": album_id,
+        "name": str(album.get("name", "")).strip() or "Album",
+        "artist": ", ".join(
+            str(artist.get("name", "")).strip()
+            for artist in album.get("artists") or []
+            if isinstance(artist, dict) and str(artist.get("name", "")).strip()
+        ),
+        "spotifyUrl": str(((album.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "tracks": tracks,
+        "uri": str(album.get("uri", "")).strip(),
+    }
+
+
+def fetch_spotify_artist_view(artist_id: str) -> dict[str, object]:
+    access_token = get_valid_spotify_access_token()
+    artist = spotify_api_get(access_token, f"/artists/{artist_id}")
+    albums_payload = paginate_spotify_items(
+        access_token,
+        f"{SPOTIFY_API_BASE}/artists/{artist_id}/albums?include_groups=album,single&limit=50",
+    )
+    albums: list[dict[str, object]] = []
+    seen_album_ids: set[str] = set()
+    for album in albums_payload:
+        album_id = str(album.get("id", "")).strip()
+        if not album_id or album_id in seen_album_ids:
+            continue
+        seen_album_ids.add(album_id)
+        albums.append(build_spotify_album_payload(album))
+    return {
+        "id": artist_id,
+        "name": str(artist.get("name", "")).strip() or "Artist",
+        "spotifyUrl": str(((artist.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "albums": albums,
+    }
+
+
 def build_spotify_track_payload(track: dict[str, object]) -> dict[str, object]:
     album_obj = track.get("album") if isinstance(track.get("album"), dict) else {}
     artist_names: list[str] = []
@@ -390,6 +566,7 @@ def build_spotify_track_payload(track: dict[str, object]) -> dict[str, object]:
         "durationMs": int(track.get("duration_ms", 0) or 0),
         "artworkUrl": artwork_url,
         "spotifyUrl": str(((track.get("external_urls") or {}).get("spotify")) or "").strip(),
+        "uri": str(track.get("uri", "")).strip(),
     }
 
 
@@ -1376,6 +1553,42 @@ def get_spotify_status():
     return jsonify(get_spotify_status_payload())
 
 
+@app.get("/api/spotify/library")
+def get_spotify_library():
+    ensure_directories()
+    try:
+        return jsonify(fetch_spotify_library_sections())
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.get("/api/spotify/playlists/<playlist_id>")
+def get_spotify_playlist_detail(playlist_id: str):
+    ensure_directories()
+    try:
+        return jsonify(fetch_spotify_playlist_tracks(playlist_id))
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.get("/api/spotify/albums/<album_id>")
+def get_spotify_album_detail(album_id: str):
+    ensure_directories()
+    try:
+        return jsonify(fetch_spotify_album_tracks(album_id))
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.get("/api/spotify/artists/<artist_id>")
+def get_spotify_artist_detail(artist_id: str):
+    ensure_directories()
+    try:
+        return jsonify(fetch_spotify_artist_view(artist_id))
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+
 @app.post("/api/spotify/connect")
 def start_spotify_connect():
     ensure_directories()
@@ -1480,6 +1693,18 @@ def spotify_player_command():
             spotify_api_request(access_token, "POST", "/me/player/next")
         elif action == "previous":
             spotify_api_request(access_token, "POST", "/me/player/previous")
+        elif action == "play-track":
+            track_uri = str(payload.get("trackUri", "")).strip()
+            context_uri = str(payload.get("contextUri", "")).strip()
+            position_ms = int(payload.get("positionMs", 0) or 0)
+            if not track_uri:
+                return jsonify({"error": "Missing Spotify track URI."}), 400
+            body: dict[str, object] = {"offset": {"uri": track_uri}}
+            if context_uri:
+                body["context_uri"] = context_uri
+            if position_ms > 0:
+                body["position_ms"] = position_ms
+            spotify_api_request(access_token, "PUT", "/me/player/play", body=body)
         else:
             return jsonify({"error": "Unsupported Spotify player command."}), 400
     except RuntimeError as error:

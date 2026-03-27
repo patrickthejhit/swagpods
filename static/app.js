@@ -315,6 +315,15 @@ let spotifyPlayerState = {
   track: null,
 };
 let spotifyPlayerPollTimer = null;
+let spotifyLibraryData = {
+  playlists: [],
+  albums: [],
+  artists: [],
+  tracks: [],
+  playlistDetails: {},
+  albumDetails: {},
+  artistDetails: {},
+};
 
 const haptics = (() => {
   const lastFireTimes = new Map();
@@ -922,6 +931,60 @@ function getLibraryState() {
     : spotifyViewState.connected
       ? `Spotify Connected${spotifyViewState.profileName ? ` • ${spotifyViewState.profileName}` : ""}`
       : "Connect Spotify to read your playlists.";
+  const spotifyViewKey = getLibraryViewKey();
+
+  if (spotifyViewKey.startsWith("spotify-playlist-detail:")) {
+    const playlistId = spotifyViewKey.split(":")[1] || "";
+    const detail = spotifyLibraryData.playlistDetails[playlistId] || null;
+    return {
+      label: "Playlists",
+      title: detail?.name || "Playlist",
+      summary: detail && detail.tracks.length === 0 ? "No playable tracks returned." : "",
+      items: (detail?.tracks || []).map((track) => ({
+        type: "action",
+        id: `spotify-track:${track.id}`,
+        title: track.title || "Spotify Track",
+        meta: track.artist || "Spotify",
+        spotifyTrack: track,
+        spotifyContextUri: detail?.uri || "",
+      })),
+    };
+  }
+
+  if (spotifyViewKey.startsWith("spotify-album-detail:")) {
+    const albumId = spotifyViewKey.split(":")[1] || "";
+    const detail = spotifyLibraryData.albumDetails[albumId] || null;
+    return {
+      label: "Albums",
+      title: detail?.name || "Album",
+      summary: detail?.artist || "",
+      items: (detail?.tracks || []).map((track) => ({
+        type: "action",
+        id: `spotify-track:${track.id}`,
+        title: track.title || "Spotify Track",
+        meta: track.artist || detail?.artist || "Spotify",
+        spotifyTrack: track,
+        spotifyContextUri: detail?.uri || "",
+      })),
+    };
+  }
+
+  if (spotifyViewKey.startsWith("spotify-artist-detail:")) {
+    const artistId = spotifyViewKey.split(":")[1] || "";
+    const detail = spotifyLibraryData.artistDetails[artistId] || null;
+    return {
+      label: "Artists",
+      title: detail?.name || "Artist",
+      summary: detail && detail.albums.length === 0 ? "No albums returned." : "",
+      items: (detail?.albums || []).map((album) => ({
+        type: "menu",
+        id: `spotify-album-detail:${album.id}`,
+        title: album.name || "Album",
+        meta: `${album.trackCount || 0} track${album.trackCount === 1 ? "" : "s"}`,
+        spotifyAlbum: album,
+      })),
+    };
+  }
 
   switch (getLibraryViewKey()) {
     case "music":
@@ -1031,21 +1094,90 @@ function getLibraryState() {
     case "spotify-library":
       return {
         label: "Spotify",
-        title: "Your Playlists",
+        title: "Library",
         summary: !spotifyViewState.connected
           ? "Connect Spotify first."
-          : spotifyViewState.playlists.length === 0
-            ? "No playlists returned from Spotify."
-            : `${spotifyViewState.playlists.length} playlist${spotifyViewState.playlists.length === 1 ? "" : "s"} available`,
+          : "Browse Spotify like it lives inside the iPod.",
         items: !spotifyViewState.connected
           ? []
-          : spotifyViewState.playlists.map((playlist) => ({
-              type: "action",
-              id: `spotify-playlist:${playlist.id}`,
-              title: playlist.name || "Untitled Playlist",
-              meta: `${playlist.trackCount || 0} track${playlist.trackCount === 1 ? "" : "s"}`,
-              spotifyPlaylist: playlist,
-            })),
+          : [
+              {
+                type: "menu",
+                id: "spotify-playlists",
+                title: "Playlists",
+                meta: `${spotifyLibraryData.playlists.length} item${spotifyLibraryData.playlists.length === 1 ? "" : "s"}`,
+              },
+              {
+                type: "menu",
+                id: "spotify-albums",
+                title: "Albums",
+                meta: `${spotifyLibraryData.albums.length} item${spotifyLibraryData.albums.length === 1 ? "" : "s"}`,
+              },
+              {
+                type: "menu",
+                id: "spotify-artists",
+                title: "Artists",
+                meta: `${spotifyLibraryData.artists.length} item${spotifyLibraryData.artists.length === 1 ? "" : "s"}`,
+              },
+              {
+                type: "menu",
+                id: "spotify-songs",
+                title: "Songs",
+                meta: `${spotifyLibraryData.tracks.length} item${spotifyLibraryData.tracks.length === 1 ? "" : "s"}`,
+              },
+            ],
+      };
+    case "spotify-playlists":
+      return {
+        label: "Spotify",
+        title: "Playlists",
+        summary: spotifyLibraryData.playlists.length === 0 ? "No playlists returned from Spotify." : "",
+        items: spotifyLibraryData.playlists.map((playlist) => ({
+          type: "menu",
+          id: `spotify-playlist-detail:${playlist.id}`,
+          title: playlist.name || "Untitled Playlist",
+          meta: `${playlist.trackCount || 0} track${playlist.trackCount === 1 ? "" : "s"}`,
+          spotifyPlaylist: playlist,
+        })),
+      };
+    case "spotify-albums":
+      return {
+        label: "Spotify",
+        title: "Albums",
+        summary: spotifyLibraryData.albums.length === 0 ? "No saved albums returned from Spotify." : "",
+        items: spotifyLibraryData.albums.map((album) => ({
+          type: "menu",
+          id: `spotify-album-detail:${album.id}`,
+          title: album.name || "Untitled Album",
+          meta: album.artist || `${album.trackCount || 0} tracks`,
+          spotifyAlbum: album,
+        })),
+      };
+    case "spotify-artists":
+      return {
+        label: "Spotify",
+        title: "Artists",
+        summary: spotifyLibraryData.artists.length === 0 ? "No artists returned from Spotify." : "",
+        items: spotifyLibraryData.artists.map((artist) => ({
+          type: "menu",
+          id: `spotify-artist-detail:${artist.id}`,
+          title: artist.name || "Unknown Artist",
+          meta: "Albums",
+          spotifyArtist: artist,
+        })),
+      };
+    case "spotify-songs":
+      return {
+        label: "Spotify",
+        title: "Songs",
+        summary: spotifyLibraryData.tracks.length === 0 ? "No saved tracks returned from Spotify." : "",
+        items: spotifyLibraryData.tracks.map((track) => ({
+          type: "action",
+          id: `spotify-track:${track.id}`,
+          title: track.title || "Spotify Track",
+          meta: track.artist || "Spotify",
+          spotifyTrack: track,
+        })),
       };
     case "podcasts":
       return {
@@ -1555,6 +1687,19 @@ async function fetchJson(url, options = {}) {
 
 function isSpotifyRemoteSong(song = currentSong) {
   return Boolean(song && song.source === "spotify");
+}
+
+function isSpotifyLibraryPath(value) {
+  return (
+    value === "spotify-library" ||
+    value === "spotify-playlists" ||
+    value === "spotify-albums" ||
+    value === "spotify-artists" ||
+    value === "spotify-songs" ||
+    value.startsWith("spotify-playlist-detail:") ||
+    value.startsWith("spotify-album-detail:") ||
+    value.startsWith("spotify-artist-detail:")
+  );
 }
 
 function startSyncPolling() {
@@ -2689,12 +2834,65 @@ async function activateLibraryItem(itemData) {
     return;
   }
 
+  if (itemData.type === "action" && String(itemData.id || "").startsWith("spotify-track:")) {
+    try {
+      await playSpotifyTrack(itemData.spotifyTrack, itemData.spotifyContextUri || "");
+    } catch (error) {
+      setMessage(error.message, "error");
+      syncUi();
+    }
+    return;
+  }
+
   if (itemData.type === "game") {
     openGame(itemData.id);
     return;
   }
 
   if (itemData.type === "menu") {
+    if (itemData.id === "spotify-library") {
+      try {
+        await refreshSpotifyLibrary();
+      } catch (error) {
+        setMessage(error.message, "error");
+        syncUi();
+        return;
+      }
+    }
+
+    if (String(itemData.id || "").startsWith("spotify-playlist-detail:")) {
+      const playlistId = itemData.id.split(":")[1] || "";
+      try {
+        await ensureSpotifyPlaylistDetail(playlistId);
+      } catch (error) {
+        setMessage(error.message, "error");
+        syncUi();
+        return;
+      }
+    }
+
+    if (String(itemData.id || "").startsWith("spotify-album-detail:")) {
+      const albumId = itemData.id.split(":")[1] || "";
+      try {
+        await ensureSpotifyAlbumDetail(albumId);
+      } catch (error) {
+        setMessage(error.message, "error");
+        syncUi();
+        return;
+      }
+    }
+
+    if (String(itemData.id || "").startsWith("spotify-artist-detail:")) {
+      const artistId = itemData.id.split(":")[1] || "";
+      try {
+        await ensureSpotifyArtistDetail(artistId);
+      } catch (error) {
+        setMessage(error.message, "error");
+        syncUi();
+        return;
+      }
+    }
+
     libraryPath = [...libraryPath, itemData.id];
     selectedIndex = 0;
     highlightedSongId = "";
@@ -2923,6 +3121,61 @@ async function refreshSpotifyStatus() {
   }
 }
 
+async function refreshSpotifyLibrary() {
+  const payload = await fetchJson("/api/spotify/library");
+  spotifyLibraryData = {
+    playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
+    albums: Array.isArray(payload.albums) ? payload.albums : [],
+    artists: Array.isArray(payload.artists) ? payload.artists : [],
+    tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
+    playlistDetails: {},
+    albumDetails: {},
+    artistDetails: {},
+  };
+}
+
+async function ensureSpotifyPlaylistDetail(playlistId) {
+  if (!playlistId || spotifyLibraryData.playlistDetails[playlistId]) {
+    return;
+  }
+  const payload = await fetchJson(`/api/spotify/playlists/${playlistId}`);
+  spotifyLibraryData.playlistDetails[playlistId] = {
+    id: payload.id || playlistId,
+    name: payload.name || "Playlist",
+    spotifyUrl: payload.spotifyUrl || "",
+    tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
+    uri: payload.uri || "",
+  };
+}
+
+async function ensureSpotifyAlbumDetail(albumId) {
+  if (!albumId || spotifyLibraryData.albumDetails[albumId]) {
+    return;
+  }
+  const payload = await fetchJson(`/api/spotify/albums/${albumId}`);
+  spotifyLibraryData.albumDetails[albumId] = {
+    id: payload.id || albumId,
+    name: payload.name || "Album",
+    artist: payload.artist || "",
+    spotifyUrl: payload.spotifyUrl || "",
+    tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
+    uri: payload.uri || "",
+  };
+}
+
+async function ensureSpotifyArtistDetail(artistId) {
+  if (!artistId || spotifyLibraryData.artistDetails[artistId]) {
+    return;
+  }
+  const payload = await fetchJson(`/api/spotify/artists/${artistId}`);
+  spotifyLibraryData.artistDetails[artistId] = {
+    id: payload.id || artistId,
+    name: payload.name || "Artist",
+    spotifyUrl: payload.spotifyUrl || "",
+    albums: Array.isArray(payload.albums) ? payload.albums : [],
+  };
+}
+
 async function connectSpotify() {
   if (!spotifyViewState.configured) {
     setMessage(
@@ -3051,6 +3304,25 @@ async function sendSpotifyPlayerCommand(action) {
   }
   renderPlayer();
   syncPlaybackButton();
+}
+
+async function playSpotifyTrack(track, contextUri = "") {
+  if (!track?.uri) {
+    throw new Error("Spotify track URI is missing.");
+  }
+  const payload = await fetchJson("/api/spotify/player/command", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      action: "play-track",
+      trackUri: track.uri,
+      contextUri,
+    }),
+  });
+  spotifyPlayerState = normalizeSpotifyPlayerState(payload);
+  await openSpotifyNowPlaying();
 }
 
 function setMessage(text, kind = "success") {
