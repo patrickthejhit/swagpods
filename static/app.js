@@ -2816,12 +2816,6 @@ async function activateLibraryItem(itemData) {
   if (itemData.type === "action" && itemData.id === "spotify-now-playing") {
     try {
       await openSpotifyNowPlaying();
-      if (!spotifyPlayerState.hasActiveDevice) {
-        setMessage(
-          "No active Spotify device. Start playback in the Spotify app first, then use SwagPods as the remote.",
-          "error"
-        );
-      }
     } catch (error) {
       setMessage(error.message, "error");
       syncUi();
@@ -3257,9 +3251,11 @@ async function refreshSpotifyPlayerState() {
     setCurrentSong({
       id: "spotify-no-track",
       fileName: "",
-      title: spotifyPlayerState.hasActiveDevice ? "Nothing Playing" : "Open Spotify",
-      artist: spotifyPlayerState.deviceName || "No Active Device",
-      album: spotifyPlayerState.deviceType || "Spotify",
+      title: "Press Play",
+      artist: "Spotify",
+      album: spotifyPlayerState.hasActiveDevice
+        ? "Use the play button to start music."
+        : "Use the play button to start Spotify playback.",
       durationSeconds: 0,
       playbackUrl: "",
       downloadUrl: "#",
