@@ -2664,6 +2664,25 @@ function renderPhotoViewer() {
 
 function renderPlayer() {
   if (!currentSong) {
+    if (screenMode === "now-playing" && spotifyViewState.connected) {
+      playerTitle.textContent = "Click Play To Start";
+      playerArtist.textContent = "Spotify";
+      playerAlbum.textContent = "Click play to start.";
+      playerArtwork.classList.add("hidden");
+      artworkPlaceholder.classList.remove("hidden");
+      playerArtwork.removeAttribute("src");
+      downloadNowButton.setAttribute("href", "#");
+      downloadNowButton.setAttribute("aria-disabled", "true");
+      downloadNowButton.classList.add("is-disabled");
+      downloadNowButton.removeAttribute("download");
+      downloadNowButton.textContent = "Open in Spotify";
+      playerElapsed.textContent = "0:00";
+      playerRemaining.textContent = "-0:00";
+      playerProgressFill.style.width = "0%";
+      syncPlaybackButton();
+      return;
+    }
+
     playerTitle.textContent = "";
     playerArtist.textContent = "";
     playerAlbum.textContent = "";
@@ -4181,12 +4200,21 @@ selectButton.addEventListener("click", async () => {
 });
 
 playbackButton.addEventListener("click", async () => {
+  haptics.prime();
+  haptics.transport();
+  if (!currentSong && screenMode === "now-playing" && spotifyViewState.connected) {
+    try {
+      await shuffleMusicSources();
+    } catch (error) {
+      setMessage(error.message, "error");
+    }
+    return;
+  }
+
   if (!currentSong) {
     return;
   }
 
-  haptics.prime();
-  haptics.transport();
   if (isSpotifyRemoteSong()) {
     try {
       if (!spotifyPlayerState.track || currentSong?.id === "spotify-no-track") {
