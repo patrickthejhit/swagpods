@@ -917,6 +917,33 @@ function getLibraryState() {
           implemented: game.implemented,
         })),
       };
+    case "spotify":
+      return {
+        label: "Main Menu",
+        title: "Spotify",
+        summary: "Connect a Spotify account to stream music in the emulator.",
+        items: [
+          {
+            type: "action",
+            id: "spotify-connect",
+            title: "Connect Spotify",
+            meta: "Stream only",
+          },
+          {
+            type: "menu",
+            id: "spotify-library",
+            title: "Your Library",
+            meta: "Coming Soon",
+          },
+        ],
+      };
+    case "spotify-library":
+      return {
+        label: "Spotify",
+        title: "Your Library",
+        summary: "Spotify browsing is not wired yet.",
+        items: [],
+      };
     case "podcasts":
       return {
         label: "Music",
@@ -1041,6 +1068,12 @@ function getLibraryState() {
             id: "music",
             title: "Music",
             meta: musicSummary,
+          },
+          {
+            type: "menu",
+            id: "spotify",
+            title: "Spotify",
+            meta: "Connect",
           },
           {
             type: "menu",
@@ -2310,6 +2343,12 @@ async function activateLibraryItem(itemData) {
 
   if (itemData.type === "action" && itemData.id === "customize") {
     screenMode = "customize";
+    syncUi();
+    return;
+  }
+
+  if (itemData.type === "action" && itemData.id === "spotify-connect") {
+    setMessage("Spotify connect flow is the next step. The menu entry is in place.", "error");
     syncUi();
     return;
   }
