@@ -1071,12 +1071,6 @@ function getLibraryState() {
           ? [
               {
                 type: "action",
-                id: "spotify-account",
-                title: "Connect Spotify",
-                meta: spotifyViewState.profileName || "Connected",
-              },
-              {
-                type: "action",
                 id: "spotify-now-playing",
                 title: "Now Playing",
                 meta: spotifyPlayerState.track?.title
@@ -2899,6 +2893,16 @@ async function activateLibraryItem(itemData) {
   }
 
   if (itemData.type === "menu") {
+    if (itemData.id === "spotify") {
+      try {
+        await refreshSpotifyStatus();
+      } catch (error) {
+        setMessage(error.message, "error");
+        syncUi();
+        return;
+      }
+    }
+
     if (itemData.id === "spotify-library") {
       try {
         await refreshSpotifyLibrary();
@@ -3715,6 +3719,8 @@ async function loadSpotifyState() {
           : "Spotify Connected",
         "success"
       );
+      libraryPath = ["main", "music", "spotify"];
+      selectedIndex = 0;
     } else if (window.APP_CONFIG?.spotifyAuthError) {
       setMessage(window.APP_CONFIG.spotifyAuthError, "error");
     } else if (spotifyViewState.error) {
