@@ -45,6 +45,7 @@ SPOTIFY_SESSION_DIR = BASE_DIR / ".spotify_sessions"
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
+SPOTIFY_DEFAULT_CLIENT_ID = "1fd5039188e3488b940933da79591fe1"
 SPOTIFY_DEFAULT_SCOPES = (
     "playlist-read-private "
     "playlist-read-collaborative "
@@ -192,7 +193,7 @@ def get_spotify_oauth_config() -> dict[str, str]:
         redirect_uri = f"{get_app_base_url()}{SPOTIFY_DEFAULT_REDIRECT_PATH}"
 
     return {
-        "clientId": os.environ.get("SPOTIFY_CLIENT_ID", "").strip(),
+        "clientId": os.environ.get("SPOTIFY_CLIENT_ID", "").strip() or SPOTIFY_DEFAULT_CLIENT_ID,
         "redirectUri": redirect_uri,
         "scopes": os.environ.get("SPOTIFY_SCOPES", SPOTIFY_DEFAULT_SCOPES).strip() or SPOTIFY_DEFAULT_SCOPES,
     }
