@@ -31,6 +31,7 @@ FFPROBE_BIN = "ffprobe"
 SCRIPT_DIR = BASE_DIR / "scripts"
 IPOD_CONFIG_SCRIPT = SCRIPT_DIR / "ipod_project_config.sh"
 IPOD_STAGE_SCRIPT = SCRIPT_DIR / "ipod_stage_all.sh"
+IPOD_RESUME_SCRIPT = SCRIPT_DIR / "ipod_resume_pipeline.sh"
 DEFAULT_IPOD_TARGET_VOLUME = "/Volumes/4 tb backup"
 DEFAULT_IPOD_PROJECT_ROOT = f"{DEFAULT_IPOD_TARGET_VOLUME}/codex ipod ready 500gb"
 
@@ -113,6 +114,7 @@ VIDEO_QUALITY_FACTORS = {
 app = Flask(__name__)
 SYNC_LOCK = threading.Lock()
 SYNC_PROCESS: subprocess.Popen[str] | None = None
+SYNC_PROCESS_KIND: str | None = None
 SYNC_STATE = {
     "state": "no_device",
     "headline": "Connect iPod to sync",
@@ -144,11 +146,23 @@ def ensure_directories() -> None:
     THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def get_static_asset_version() -> int:
+    static_files = [
+        BASE_DIR / "static" / "app.js",
+        BASE_DIR / "static" / "styles.css",
+    ]
+    existing_files = [path for path in static_files if path.exists()]
+    if not existing_files:
+        return 0
+    return max(int(path.stat().st_mtime) for path in existing_files)
+
+
 def get_ipod_sync_config() -> dict[str, str]:
     config = {
         "targetVolume": os.environ.get("IPOD_TARGET_VOLUME", DEFAULT_IPOD_TARGET_VOLUME),
         "projectRoot": os.environ.get("IPOD_PROJECT_ROOT", DEFAULT_IPOD_PROJECT_ROOT),
         "pipelineLog": os.environ.get("IPOD_PIPELINE_LOG", str(Path.home() / ".codex" / "ipod-supervisor" / "stage_pipeline.log")),
+        "screenName": os.environ.get("IPOD_SCREEN_NAME", "ipod_500gb"),
     }
 
     if not IPOD_CONFIG_SCRIPT.exists():
@@ -160,8 +174,8 @@ def get_ipod_sync_config() -> dict[str, str]:
             "-lc",
             (
                 f"source {shlex.quote(str(IPOD_CONFIG_SCRIPT))} >/dev/null 2>&1; "
-                'printf "targetVolume=%s\\nprojectRoot=%s\\npipelineLog=%s\\n" '
-                '"${IPOD_TARGET_VOLUME:-}" "${IPOD_PROJECT_ROOT:-}" "${IPOD_PIPELINE_LOG:-}"'
+                'printf "targetVolume=%s\\nprojectRoot=%s\\npipelineLog=%s\\nscreenName=%s\\n" '
+                '"${IPOD_TARGET_VOLUME:-}" "${IPOD_PROJECT_ROOT:-}" "${IPOD_PIPELINE_LOG:-}" "${IPOD_SCREEN_NAME:-}"'
             ),
         ],
         capture_output=True,
@@ -183,6 +197,17 @@ def get_ipod_sync_config() -> dict[str, str]:
 
 def count_syncable_media() -> int:
     return len(list(EXPORT_DIR.glob("*.mp3"))) + len(list(EXPORT_DIR.glob("*.mp4")))
+
+
+def is_converter_running(screen_name: str) -> bool:
+    result = subprocess.run(
+        ["/usr/bin/env", "screen", "-ls"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    screen_listing = result.stdout or ""
+    return f".{screen_name}" in screen_listing
 
 
 def detect_connected_ipod_device() -> tuple[bool, str]:
@@ -219,16 +244,21 @@ def get_sync_environment(force: bool = False) -> dict[str, object]:
     target_volume = Path(config["targetVolume"])
     project_root = Path(config["projectRoot"])
     pipeline_ready = IPOD_STAGE_SCRIPT.exists()
+    resume_ready = IPOD_RESUME_SCRIPT.exists()
+    screen_name = config["screenName"] or "ipod_500gb"
     env = {
         "deviceDetected": device_detected,
         "deviceName": device_name or "iPod",
         "bridgeReady": pipeline_ready and target_volume.exists(),
         "targetVolumeReady": target_volume.exists(),
         "pipelineScriptReady": pipeline_ready,
+        "resumeScriptReady": resume_ready,
+        "converterRunning": is_converter_running(screen_name) if target_volume.exists() else False,
         "mediaCount": count_syncable_media(),
         "targetVolume": str(target_volume),
         "projectRoot": str(project_root),
         "pipelineLog": str(config["pipelineLog"]),
+        "screenName": screen_name,
     }
     SYNC_ENV_CACHE["timestamp"] = now
     SYNC_ENV_CACHE["value"] = dict(env)
@@ -271,20 +301,53 @@ def launch_ipod_sync_pipeline() -> subprocess.Popen[str]:
     )
 
 
+def launch_ipod_resume_pipeline() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        ["/bin/bash", str(IPOD_RESUME_SCRIPT)],
+        cwd=BASE_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        text=True,
+    )
+
+
 def get_sync_payload(force_env: bool = False) -> dict[str, object]:
-    global SYNC_PROCESS
+    global SYNC_PROCESS, SYNC_PROCESS_KIND
 
     env = get_sync_environment(force=force_env)
     with SYNC_LOCK:
         if SYNC_PROCESS is not None:
             returncode = SYNC_PROCESS.poll()
             if returncode is None:
-                if not bool(env["deviceDetected"]):
+                if SYNC_PROCESS_KIND == "resume":
+                    if bool(env["converterRunning"]):
+                        SYNC_PROCESS = None
+                        SYNC_PROCESS_KIND = None
+                        set_sync_state(
+                            "syncing",
+                            "Converter Running",
+                            "External SSD is active",
+                            can_start=False,
+                            busy=True,
+                            sticky=True,
+                        )
+                    else:
+                        set_sync_state(
+                            "syncing",
+                            "Resuming converter...",
+                            "External SSD pipeline starting",
+                            can_start=False,
+                            busy=True,
+                            sticky=True,
+                        )
+                elif not bool(env["deviceDetected"]):
                     try:
                         SYNC_PROCESS.terminate()
                     except OSError:
                         pass
                     SYNC_PROCESS = None
+                    SYNC_PROCESS_KIND = None
                     set_sync_state(
                         "error",
                         "Sync failed",
@@ -304,8 +367,32 @@ def get_sync_payload(force_env: bool = False) -> dict[str, object]:
                         sticky=True,
                     )
             else:
+                process_kind = SYNC_PROCESS_KIND
                 SYNC_PROCESS = None
-                if returncode == 0:
+                SYNC_PROCESS_KIND = None
+                if returncode == 0 and process_kind == "resume":
+                    if bool(env["converterRunning"]):
+                        set_sync_state(
+                            "syncing",
+                            "Converter Running",
+                            "External SSD is active",
+                            can_start=False,
+                            busy=True,
+                            sticky=True,
+                        )
+                    elif bool(env["targetVolumeReady"]) and bool(env["resumeScriptReady"]):
+                        set_sync_state(
+                            "ready",
+                            "External SSD Ready",
+                            "Press center to resume converter",
+                            action_label="Resume Converter",
+                            can_start=True,
+                            busy=False,
+                            sticky=False,
+                        )
+                    else:
+                        set_sync_state("no_device", "Connect iPod to sync")
+                elif returncode == 0:
                     set_sync_state(
                         "success",
                         "Synced",
@@ -314,14 +401,24 @@ def get_sync_payload(force_env: bool = False) -> dict[str, object]:
                         sticky=True,
                     )
                 else:
-                    set_sync_state(
-                        "error",
-                        "Sync failed",
-                        "Please try again",
-                        action_label="Retry Sync" if bool(env["deviceDetected"]) else "",
-                        can_start=bool(env["deviceDetected"]),
-                        sticky=True,
-                    )
+                    if process_kind == "resume":
+                        set_sync_state(
+                            "error",
+                            "Resume failed",
+                            "Please try again",
+                            action_label="Resume Converter" if bool(env["targetVolumeReady"]) and bool(env["resumeScriptReady"]) else "",
+                            can_start=bool(env["targetVolumeReady"]) and bool(env["resumeScriptReady"]),
+                            sticky=True,
+                        )
+                    else:
+                        set_sync_state(
+                            "error",
+                            "Sync failed",
+                            "Please try again",
+                            action_label="Retry Sync" if bool(env["deviceDetected"]) else "",
+                            can_start=bool(env["deviceDetected"]),
+                            sticky=True,
+                        )
         elif SYNC_STATE["state"] == "success":
             if not bool(env["deviceDetected"]):
                 set_sync_state("no_device", "Connect iPod to sync")
@@ -330,7 +427,27 @@ def get_sync_payload(force_env: bool = False) -> dict[str, object]:
                 set_sync_state("no_device", "Connect iPod to sync")
         else:
             if not bool(env["deviceDetected"]):
-                set_sync_state("no_device", "Connect iPod to sync")
+                if bool(env["converterRunning"]):
+                    set_sync_state(
+                        "syncing",
+                        "Converter Running",
+                        "External SSD is active",
+                        can_start=False,
+                        busy=True,
+                        sticky=True,
+                    )
+                elif bool(env["targetVolumeReady"]) and bool(env["resumeScriptReady"]):
+                    set_sync_state(
+                        "ready",
+                        "External SSD Ready",
+                        "Press center to resume converter",
+                        action_label="Resume Converter",
+                        can_start=True,
+                        busy=False,
+                        sticky=False,
+                    )
+                else:
+                    set_sync_state("no_device", "Connect iPod to sync")
             else:
                 media_count = int(env["mediaCount"])
                 media_text = "Library ready" if media_count == 0 else f"{media_count} item{'s' if media_count != 1 else ''} ready"
@@ -803,6 +920,7 @@ def index():
         "index.html",
         export_dir=str(EXPORT_DIR),
         upload_dir=str(UPLOAD_DIR),
+        asset_version=get_static_asset_version(),
     )
 
 
@@ -940,7 +1058,7 @@ def get_sync_status():
 
 @app.post("/api/sync/start")
 def start_sync():
-    global SYNC_PROCESS
+    global SYNC_PROCESS, SYNC_PROCESS_KIND
 
     ensure_directories()
     env = get_sync_environment(force=True)
@@ -956,7 +1074,28 @@ def start_sync():
             )
 
         elif not bool(env["deviceDetected"]):
-            set_sync_state("no_device", "Connect iPod to sync")
+            if bool(env["targetVolumeReady"]) and bool(env["resumeScriptReady"]):
+                try:
+                    SYNC_PROCESS = launch_ipod_resume_pipeline()
+                    SYNC_PROCESS_KIND = "resume"
+                    set_sync_state(
+                        "syncing",
+                        "Resuming converter...",
+                        "External SSD pipeline starting",
+                        busy=True,
+                        sticky=True,
+                    )
+                except OSError:
+                    set_sync_state(
+                        "error",
+                        "Resume failed",
+                        "Please try again",
+                        action_label="Resume Converter",
+                        can_start=True,
+                        sticky=True,
+                    )
+            else:
+                set_sync_state("no_device", "Connect iPod to sync")
 
         elif not bool(env["bridgeReady"]):
             set_sync_state(
@@ -971,6 +1110,7 @@ def start_sync():
         else:
             try:
                 SYNC_PROCESS = launch_ipod_sync_pipeline()
+                SYNC_PROCESS_KIND = "sync"
                 set_sync_state(
                     "syncing",
                     "Syncing...",
