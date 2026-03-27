@@ -995,23 +995,37 @@ function getLibraryState() {
         items: [
           {
             type: "menu",
-            id: "songs",
-            title: "Songs",
+            id: "spotify",
+            title: "Spotify",
+            meta: spotifyConnectedMeta,
+          },
+          {
+            type: "menu",
+            id: "downloaded",
+            title: "Downloaded",
             meta: musicSummary,
           },
           {
-            type: "menu",
-            id: "podcasts",
-            title: "Podcasts",
-            meta: podcastSummary,
-          },
-          {
-            type: "menu",
-            id: "playlists",
-            title: "Playlists",
-            meta: "Converted",
+            type: "action",
+            id: "music-shuffle",
+            title: "Shuffle",
+            meta: spotifyViewState.connected ? "All Sources" : "Downloaded",
           },
         ],
+      };
+    case "downloaded":
+      return {
+        label: "Music",
+        title: "Downloaded",
+        summary:
+          musicSongs.length === 0
+            ? "No downloaded songs yet."
+            : `${musicSongs.length} song${musicSongs.length === 1 ? "" : "s"} available`,
+        items: musicSongs.map((song) => ({
+          type: "song",
+          id: song.id,
+          song,
+        })),
       };
     case "videos":
       return {
@@ -1303,12 +1317,6 @@ function getLibraryState() {
             id: "music",
             title: "Music",
             meta: musicSummary,
-          },
-          {
-            type: "menu",
-            id: "spotify",
-            title: "Spotify",
-            meta: spotifyConnectedMeta,
           },
           {
             type: "menu",
@@ -2821,6 +2829,16 @@ async function activateLibraryItem(itemData) {
     return;
   }
 
+  if (itemData.type === "action" && itemData.id === "music-shuffle") {
+    try {
+      await shuffleMusicSources();
+    } catch (error) {
+      setMessage(error.message, "error");
+      syncUi();
+    }
+    return;
+  }
+
   if (itemData.type === "action" && String(itemData.id || "").startsWith("spotify-playlist:")) {
     const playlist = itemData.spotifyPlaylist || null;
     if (playlist?.spotifyUrl) {
@@ -3323,6 +3341,40 @@ async function playSpotifyTrack(track, contextUri = "") {
   });
   spotifyPlayerState = normalizeSpotifyPlayerState(payload);
   await openSpotifyNowPlaying();
+}
+
+async function shuffleMusicSources() {
+  if (spotifyViewState.connected && spotifyLibraryData.tracks.length === 0) {
+    await refreshSpotifyLibrary();
+  }
+
+  const localTracks = getSongsByCategory("Music").map((song) => ({
+    source: "downloaded",
+    song,
+  }));
+  const spotifyTracks = spotifyViewState.connected
+    ? spotifyLibraryData.tracks.map((track) => ({
+        source: "spotify",
+        track,
+      }))
+    : [];
+
+  const pool = shuffleArray([...localTracks, ...spotifyTracks]);
+  const nextItem = pool[0] || null;
+  if (!nextItem) {
+    throw new Error("No songs available to shuffle.");
+  }
+
+  if (nextItem.source === "spotify") {
+    await playSpotifyTrack(nextItem.track);
+    return;
+  }
+
+  const songIndex = getSongIndex(nextItem.song.id);
+  if (songIndex === -1) {
+    throw new Error("Downloaded track is no longer available.");
+  }
+  await playSongAtIndex(songIndex);
 }
 
 function setMessage(text, kind = "success") {
