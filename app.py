@@ -1473,6 +1473,8 @@ def index():
         asset_version=get_static_asset_version(),
         spotify_auth_state=str(request.args.get("spotify", "")).strip(),
         spotify_auth_error=str(request.args.get("spotify_error", "")).strip(),
+        spotify_auth_code=str(request.args.get("spotify_code", "")).strip(),
+        spotify_auth_callback_state=str(request.args.get("spotify_state", "")).strip(),
     )
 
 
@@ -1654,8 +1656,6 @@ def start_spotify_connect():
     verifier = _b64url_no_padding(secrets.token_bytes(48))
     challenge = _b64url_no_padding(hashlib.sha256(verifier.encode("ascii")).digest())
     state = secrets.token_urlsafe(24)
-    session["spotify_pkce_verifier"] = verifier
-    session["spotify_oauth_state"] = state
 
     params = {
         "client_id": config["clientId"],
@@ -1667,27 +1667,27 @@ def start_spotify_connect():
         "state": state,
     }
     authorize_url = f"{SPOTIFY_AUTH_URL}?{urllib.parse.urlencode(params)}"
-    return jsonify({"authorizeUrl": authorize_url})
+    return jsonify(
+        {
+            "authorizeUrl": authorize_url,
+            "codeVerifier": verifier,
+            "state": state,
+            "redirectUri": config["redirectUri"],
+        }
+    )
 
 
-@app.get("/spotify/callback")
-def spotify_callback():
+@app.post("/api/spotify/exchange")
+def spotify_exchange_code():
     ensure_directories()
     config = get_spotify_oauth_config()
-    error_value = str(request.args.get("error", "")).strip()
-    if error_value:
-        return redirect(url_for("index", spotify="error", spotify_error=f"Spotify authorization failed: {error_value}"))
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get("code", "")).strip()
+    verifier = str(payload.get("codeVerifier", "")).strip()
+    redirect_uri = str(payload.get("redirectUri", "")).strip() or config["redirectUri"]
 
-    code = str(request.args.get("code", "")).strip()
-    state = str(request.args.get("state", "")).strip()
-    expected_state = str(session.get("spotify_oauth_state", "")).strip()
-    verifier = str(session.get("spotify_pkce_verifier", "")).strip()
-
-    session.pop("spotify_oauth_state", None)
-    session.pop("spotify_pkce_verifier", None)
-
-    if not code or not state or state != expected_state or not verifier:
-        return redirect(url_for("index", spotify="error", spotify_error="Spotify callback validation failed. Try connecting again."))
+    if not code or not verifier:
+        return jsonify({"error": "Missing Spotify authorization code or PKCE verifier."}), 400
 
     try:
         token_data = spotify_token_request(
@@ -1695,23 +1695,37 @@ def spotify_callback():
                 "client_id": config["clientId"],
                 "grant_type": "authorization_code",
                 "code": code,
-                "redirect_uri": config["redirectUri"],
+                "redirect_uri": redirect_uri,
                 "code_verifier": verifier,
             }
         )
     except RuntimeError as error:
-        return redirect(url_for("index", spotify="error", spotify_error=str(error)))
+        return jsonify({"error": str(error)}), 400
 
     save_spotify_session_data(
         {
             "connected_at": datetime.now().isoformat(),
             "client_id": config["clientId"],
-            "redirect_uri": config["redirectUri"],
+            "redirect_uri": redirect_uri,
             "scopes": config["scopes"],
             **token_data,
         }
     )
-    return redirect(url_for("index", spotify="connected"))
+    return jsonify({"ok": True})
+
+
+@app.get("/spotify/callback")
+def spotify_callback():
+    ensure_directories()
+    error_value = str(request.args.get("error", "")).strip()
+    if error_value:
+        return redirect(url_for("index", spotify="error", spotify_error=f"Spotify authorization failed: {error_value}"))
+
+    code = str(request.args.get("code", "")).strip()
+    state = str(request.args.get("state", "")).strip()
+    if not code or not state:
+        return redirect(url_for("index", spotify="error", spotify_error="Spotify callback validation failed. Try connecting again."))
+    return redirect(url_for("index", spotify="callback", spotify_code=code, spotify_state=state))
 
 
 @app.post("/api/spotify/disconnect")

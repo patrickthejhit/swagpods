@@ -480,6 +480,8 @@
         exportDir: {{ export_dir | tojson }},
         spotifyAuthState: {{ spotify_auth_state | tojson }},
         spotifyAuthError: {{ spotify_auth_error | tojson }},
+        spotifyAuthCode: {{ spotify_auth_code | tojson }},
+        spotifyAuthCallbackState: {{ spotify_auth_callback_state | tojson }},
       };
     </script>
     <script src="https://sdk.scdn.co/spotify-player.js"></script>

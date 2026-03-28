@@ -328,6 +328,7 @@ let spotifySdkPlayer = null;
 let spotifySdkDeviceId = "";
 let spotifySdkReady = false;
 let spotifySdkInitPromise = null;
+const SPOTIFY_PKCE_STORAGE_KEY = "swagpods.spotify.pkce";
 
 const haptics = (() => {
   const lastFireTimes = new Map();
@@ -1705,6 +1706,32 @@ async function getSpotifyWebPlaybackToken() {
 
 function isSpotifySdkAvailable() {
   return typeof window !== "undefined" && Boolean(window.Spotify);
+}
+
+function saveSpotifyPkceState(payload) {
+  if (typeof window === "undefined" || !window.sessionStorage) {
+    return;
+  }
+  window.sessionStorage.setItem(SPOTIFY_PKCE_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function loadSpotifyPkceState() {
+  if (typeof window === "undefined" || !window.sessionStorage) {
+    return null;
+  }
+  try {
+    const value = window.sessionStorage.getItem(SPOTIFY_PKCE_STORAGE_KEY);
+    return value ? JSON.parse(value) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function clearSpotifyPkceState() {
+  if (typeof window === "undefined" || !window.sessionStorage) {
+    return;
+  }
+  window.sessionStorage.removeItem(SPOTIFY_PKCE_STORAGE_KEY);
 }
 
 function isSpotifyLibraryPath(value) {
@@ -3355,6 +3382,11 @@ async function connectSpotify() {
   if (!payload.authorizeUrl) {
     throw new Error("Spotify authorize URL was not returned.");
   }
+  saveSpotifyPkceState({
+    state: payload.state || "",
+    codeVerifier: payload.codeVerifier || "",
+    redirectUri: payload.redirectUri || "",
+  });
   window.location.assign(payload.authorizeUrl);
 }
 
@@ -3362,6 +3394,7 @@ async function disconnectSpotify() {
   await fetchJson("/api/spotify/disconnect", {
     method: "POST",
   });
+  clearSpotifyPkceState();
   stopSpotifyPlayerPolling();
   spotifyPlayerState = normalizeSpotifyPlayerState();
   if (isSpotifyRemoteSong()) {
@@ -3698,6 +3731,31 @@ async function loadPersistedLibrary() {
 
 async function loadSpotifyState() {
   try {
+    if (window.APP_CONFIG?.spotifyAuthState === "callback" && window.APP_CONFIG?.spotifyAuthCode) {
+      const pkceState = loadSpotifyPkceState();
+      if (!pkceState?.state || !pkceState?.codeVerifier) {
+        setMessage("Spotify sign-in expired before it completed. Try Connect Spotify again.", "error");
+        clearSpotifyPkceState();
+      } else if (pkceState.state !== window.APP_CONFIG.spotifyAuthCallbackState) {
+        setMessage("Spotify sign-in state did not match. Try Connect Spotify again.", "error");
+        clearSpotifyPkceState();
+      } else {
+        await fetchJson("/api/spotify/exchange", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            code: window.APP_CONFIG.spotifyAuthCode,
+            codeVerifier: pkceState.codeVerifier,
+            redirectUri: pkceState.redirectUri,
+          }),
+        });
+        clearSpotifyPkceState();
+        window.APP_CONFIG.spotifyAuthState = "connected";
+      }
+    }
+
     await refreshSpotifyStatus();
     if (spotifyViewState.connected) {
       try {
