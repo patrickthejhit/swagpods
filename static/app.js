@@ -328,6 +328,7 @@ let spotifySdkPlayer = null;
 let spotifySdkDeviceId = "";
 let spotifySdkReady = false;
 let spotifySdkInitPromise = null;
+let spotifyDeviceTransferPromise = null;
 let spotifyConnectInFlight = false;
 let spotifyAuthCallbackHandled = false;
 const SPOTIFY_PKCE_STORAGE_KEY = "swagpods.spotify.pkce";
@@ -3301,19 +3302,37 @@ async function initializeSpotifySdk() {
       player.addListener("ready", ({ device_id }) => {
         spotifySdkDeviceId = device_id;
         spotifySdkReady = true;
+        logSpotifyAuth("Player ready", `device_id=${device_id}`);
+        void ensureSpotifyPlaybackDevice({ autoplay: false }).catch((error) => {
+          logSpotifyAuth("Playback transfer failed", error.message || "unknown");
+        });
         resolve();
       });
       player.addListener("not_ready", () => {
         spotifySdkReady = false;
+        logSpotifyAuth("Player not ready");
       });
-      player.addListener("initialization_error", ({ message }) => reject(new Error(message)));
-      player.addListener("authentication_error", ({ message }) => reject(new Error(message)));
-      player.addListener("account_error", ({ message }) => reject(new Error(message)));
-      player.addListener("playback_error", ({ message }) => reject(new Error(message)));
+      player.addListener("initialization_error", ({ message }) => {
+        logSpotifyAuth("SDK initialization_error", message || "");
+        reject(new Error(message));
+      });
+      player.addListener("authentication_error", ({ message }) => {
+        logSpotifyAuth("SDK authentication_error", message || "");
+        reject(new Error(message));
+      });
+      player.addListener("account_error", ({ message }) => {
+        logSpotifyAuth("SDK account_error", message || "");
+        reject(new Error(message));
+      });
+      player.addListener("playback_error", ({ message }) => {
+        logSpotifyAuth("SDK playback_error", message || "");
+        reject(new Error(message));
+      });
       player.addListener("player_state_changed", (state) => {
         if (!state || !state.track_window?.current_track) {
           return;
         }
+        logSpotifyAuth("Playback started", state.track_window.current_track?.name || "track");
         const currentTrack = state.track_window.current_track;
         spotifyPlayerState = {
           ...spotifyPlayerState,
@@ -3347,6 +3366,7 @@ async function initializeSpotifySdk() {
           reject(new Error("Spotify browser playback could not connect."));
           return;
         }
+        logSpotifyAuth("SDK connected");
         spotifySdkPlayer = player;
       }).catch((error) => reject(new Error(error.message || "Spotify browser playback failed to connect.")));
     };
@@ -3368,6 +3388,35 @@ async function initializeSpotifySdk() {
   });
 
   return spotifySdkInitPromise;
+}
+
+async function ensureSpotifyPlaybackDevice(options = {}) {
+  const { autoplay = false } = options;
+  if (!spotifyViewState.connected || !spotifySdkDeviceId) {
+    return;
+  }
+  if (spotifyDeviceTransferPromise) {
+    return spotifyDeviceTransferPromise;
+  }
+
+  spotifyDeviceTransferPromise = (async () => {
+    logSpotifyAuth("Transferring playback", `device_id=${spotifySdkDeviceId} play=${autoplay ? "1" : "0"}`);
+    const payload = await fetchJson("/api/spotify/player/transfer", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        deviceId: spotifySdkDeviceId,
+        play: autoplay,
+      }),
+    });
+    spotifyPlayerState = normalizeSpotifyPlayerState(payload);
+  })().finally(() => {
+    spotifyDeviceTransferPromise = null;
+  });
+
+  return spotifyDeviceTransferPromise;
 }
 
 async function refreshSpotifyLibrary(options = {}) {
@@ -3499,6 +3548,9 @@ async function disconnectSpotify() {
   });
   clearSpotifyPkceState();
   clearSpotifyLibraryCache();
+  spotifyDeviceTransferPromise = null;
+  spotifySdkDeviceId = "";
+  spotifySdkReady = false;
   stopSpotifyPlayerPolling();
   spotifyPlayerState = normalizeSpotifyPlayerState();
   if (isSpotifyRemoteSong()) {
@@ -3581,10 +3633,44 @@ async function openSpotifyNowPlaying() {
 }
 
 async function sendSpotifyPlayerCommand(action) {
+  logSpotifyAuth("Button click", action);
   await initializeSpotifySdk();
   if (spotifySdkPlayer && typeof spotifySdkPlayer.activateElement === "function" && action === "play") {
     await spotifySdkPlayer.activateElement();
   }
+  await ensureSpotifyPlaybackDevice({ autoplay: action === "play" });
+
+  // Prefer SDK-native transport controls for immediate local responsiveness.
+  if (spotifySdkPlayer) {
+    try {
+      if (action === "play" || action === "pause") {
+        const shouldToggle = (action === "play" && !spotifyPlayerState.isPlaying) || (action === "pause" && spotifyPlayerState.isPlaying);
+        if (shouldToggle && typeof spotifySdkPlayer.togglePlay === "function") {
+          await spotifySdkPlayer.togglePlay();
+          window.setTimeout(() => {
+            void refreshSpotifyPlayerState().catch(() => {});
+          }, 120);
+          return;
+        }
+      } else if (action === "next" && typeof spotifySdkPlayer.nextTrack === "function") {
+        await spotifySdkPlayer.nextTrack();
+        window.setTimeout(() => {
+          void refreshSpotifyPlayerState().catch(() => {});
+        }, 120);
+        return;
+      } else if (action === "previous" && typeof spotifySdkPlayer.previousTrack === "function") {
+        await spotifySdkPlayer.previousTrack();
+        window.setTimeout(() => {
+          void refreshSpotifyPlayerState().catch(() => {});
+        }, 120);
+        return;
+      }
+    } catch (error) {
+      logSpotifyAuth("SDK command failed", error.message || "unknown");
+    }
+  }
+
+  logSpotifyAuth("Falling back to Web API command", action);
   const payload = await fetchJson("/api/spotify/player/command", {
     method: "POST",
     headers: {
@@ -3617,13 +3703,16 @@ async function sendSpotifyPlayerCommand(action) {
 }
 
 async function playSpotifyTrack(track, contextUri = "") {
-  if (!track?.uri) {
+  if (!track?.uri || !String(track.uri).startsWith("spotify:track:")) {
     throw new Error("Spotify track URI is missing.");
   }
+  logSpotifyAuth("Playback started", track.uri);
+  setMessage("Loading Spotify track...", "success");
   await initializeSpotifySdk();
   if (spotifySdkPlayer && typeof spotifySdkPlayer.activateElement === "function") {
     await spotifySdkPlayer.activateElement();
   }
+  await ensureSpotifyPlaybackDevice({ autoplay: true });
   const payload = await fetchJson("/api/spotify/player/command", {
     method: "POST",
     headers: {
@@ -3638,6 +3727,7 @@ async function playSpotifyTrack(track, contextUri = "") {
   });
   spotifyPlayerState = normalizeSpotifyPlayerState(payload);
   await openSpotifyNowPlaying();
+  setMessage("Spotify playback started.", "success");
 }
 
 async function shuffleMusicSources() {
@@ -4198,6 +4288,7 @@ menuButton.addEventListener("click", () => {
 });
 
 rewindButton.addEventListener("click", async () => {
+  logSpotifyAuth("Button click", "rewind");
   haptics.prime();
   haptics.transport();
   if (screenMode === "library") {
@@ -4248,6 +4339,7 @@ rewindButton.addEventListener("click", async () => {
 });
 
 forwardButton.addEventListener("click", async () => {
+  logSpotifyAuth("Button click", "forward");
   haptics.prime();
   haptics.transport();
   if (screenMode === "library") {
@@ -4605,10 +4697,12 @@ selectButton.addEventListener("click", async () => {
 });
 
 playbackButton.addEventListener("click", async () => {
+  logSpotifyAuth("Button click", "playback-toggle");
   haptics.prime();
   haptics.transport();
   if (!currentSong && screenMode === "now-playing" && spotifyViewState.connected) {
     try {
+      setMessage("Loading Spotify playback...", "success");
       await startSpotifyPlaybackFromEmptyState();
     } catch (error) {
       if (String(error.message || "").toLowerCase().includes("no available spotify device")) {
@@ -4626,6 +4720,7 @@ playbackButton.addEventListener("click", async () => {
   if (isSpotifyRemoteSong()) {
     try {
       if (!spotifyPlayerState.track || currentSong?.id === "spotify-no-track") {
+        setMessage("Loading Spotify playback...", "success");
         await startSpotifyPlaybackFromEmptyState();
       } else {
         await sendSpotifyPlayerCommand(spotifyPlayerState.isPlaying ? "pause" : "play");

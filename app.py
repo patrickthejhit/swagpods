@@ -47,12 +47,19 @@ SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 SPOTIFY_DEFAULT_CLIENT_ID = "1fd5039188e3488b940933da79591fe1"
 SPOTIFY_DEFAULT_SCOPES = (
+    "streaming "
     "playlist-read-private "
     "playlist-read-collaborative "
     "user-library-read "
     "user-read-playback-state "
     "user-read-currently-playing "
     "user-modify-playback-state"
+)
+SPOTIFY_REQUIRED_SCOPES = (
+    "streaming",
+    "user-read-playback-state",
+    "user-read-currently-playing",
+    "user-modify-playback-state",
 )
 SPOTIFY_DEFAULT_REDIRECT_PATH = "/spotify/callback"
 SPOTIFY_USER_AGENT = "swagpods-spotify-connect/1.0"
@@ -197,10 +204,19 @@ def get_spotify_oauth_config() -> dict[str, str]:
     if not redirect_uri:
         redirect_uri = f"{get_app_base_url()}{SPOTIFY_DEFAULT_REDIRECT_PATH}"
 
+    requested_scopes = os.environ.get("SPOTIFY_SCOPES", SPOTIFY_DEFAULT_SCOPES).strip() or SPOTIFY_DEFAULT_SCOPES
+    scope_items = [item.strip() for item in requested_scopes.split() if item.strip()]
+    scope_set = set(scope_items)
+    for required_scope in SPOTIFY_REQUIRED_SCOPES:
+        if required_scope not in scope_set:
+            scope_items.append(required_scope)
+            scope_set.add(required_scope)
+    normalized_scopes = " ".join(scope_items)
+
     return {
         "clientId": os.environ.get("SPOTIFY_CLIENT_ID", "").strip() or SPOTIFY_DEFAULT_CLIENT_ID,
         "redirectUri": redirect_uri,
-        "scopes": os.environ.get("SPOTIFY_SCOPES", SPOTIFY_DEFAULT_SCOPES).strip() or SPOTIFY_DEFAULT_SCOPES,
+        "scopes": normalized_scopes,
     }
 
 
@@ -689,6 +705,17 @@ def get_spotify_status_payload() -> dict[str, object]:
 
     session_data = load_spotify_session_data()
     if not session_data:
+        return status
+
+    session_scopes_raw = str(session_data.get("scope") or session_data.get("scopes") or "").strip()
+    session_scopes = {item.strip() for item in session_scopes_raw.split() if item.strip()}
+    missing_required = [scope for scope in SPOTIFY_REQUIRED_SCOPES if scope not in session_scopes]
+    if missing_required:
+        clear_spotify_session_data()
+        status["error"] = (
+            "Spotify session is missing required playback scopes "
+            f"({', '.join(missing_required)}). Please reconnect Spotify."
+        )
         return status
 
     try:
@@ -1836,6 +1863,32 @@ def get_spotify_web_playback_token():
     except RuntimeError as error:
         return jsonify({"error": str(error)}), 400
     return jsonify({"accessToken": access_token})
+
+
+@app.post("/api/spotify/player/transfer")
+def spotify_player_transfer():
+    ensure_directories()
+    payload = request.get_json(silent=True) or {}
+    device_id = str(payload.get("deviceId", "")).strip()
+    should_play = bool(payload.get("play"))
+    if not device_id:
+        return jsonify({"error": "Missing Spotify playback device ID."}), 400
+
+    access_token = get_valid_spotify_access_token()
+    try:
+        spotify_api_request(
+            access_token,
+            "PUT",
+            "/me/player",
+            body={"device_ids": [device_id], "play": should_play},
+        )
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+    try:
+        return jsonify(fetch_spotify_player_state_payload())
+    except RuntimeError:
+        return jsonify({"ok": True, "connected": True, "deviceId": device_id})
 
 
 @app.post("/api/spotify/player/command")
