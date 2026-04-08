@@ -56,6 +56,10 @@ SPOTIFY_DEFAULT_SCOPES = (
 )
 SPOTIFY_DEFAULT_REDIRECT_PATH = "/spotify/callback"
 SPOTIFY_USER_AGENT = "swagpods-spotify-connect/1.0"
+SPOTIFY_OAUTH_STATE_KEY = "spotify_oauth_state"
+SPOTIFY_OAUTH_PKCE_VERIFIER_KEY = "spotify_pkce_verifier"
+SPOTIFY_OAUTH_REDIRECT_URI_KEY = "spotify_oauth_redirect_uri"
+SPOTIFY_OAUTH_STARTED_AT_KEY = "spotify_oauth_started_at"
 
 AUDIO_FIELD_MAP = {
     "title": ("title", TIT2),
@@ -239,6 +243,21 @@ def clear_spotify_session_data() -> None:
 
 def spotify_is_configured() -> bool:
     return bool(get_spotify_oauth_config()["clientId"])
+
+
+def log_spotify_oauth_step(step: str, detail: str = "") -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    message = f"[spotify-oauth] {timestamp} {step}"
+    if detail:
+        message = f"{message} | {detail}"
+    print(message, flush=True)
+
+
+def clear_spotify_oauth_pending_state() -> None:
+    session.pop(SPOTIFY_OAUTH_STATE_KEY, None)
+    session.pop(SPOTIFY_OAUTH_PKCE_VERIFIER_KEY, None)
+    session.pop(SPOTIFY_OAUTH_REDIRECT_URI_KEY, None)
+    session.pop(SPOTIFY_OAUTH_STARTED_AT_KEY, None)
 
 
 def spotify_token_request(form_data: dict[str, str]) -> dict[str, object]:
@@ -1667,6 +1686,12 @@ def start_spotify_connect():
         "state": state,
     }
     authorize_url = f"{SPOTIFY_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    session[SPOTIFY_OAUTH_STATE_KEY] = state
+    session[SPOTIFY_OAUTH_PKCE_VERIFIER_KEY] = verifier
+    session[SPOTIFY_OAUTH_REDIRECT_URI_KEY] = config["redirectUri"]
+    session[SPOTIFY_OAUTH_STARTED_AT_KEY] = int(time.time())
+    session.modified = True
+    log_spotify_oauth_step("start_auth", f"redirect_uri={config['redirectUri']}")
     return jsonify(
         {
             "authorizeUrl": authorize_url,
@@ -1683,12 +1708,23 @@ def spotify_exchange_code():
     config = get_spotify_oauth_config()
     payload = request.get_json(silent=True) or {}
     code = str(payload.get("code", "")).strip()
-    verifier = str(payload.get("codeVerifier", "")).strip()
-    redirect_uri = str(payload.get("redirectUri", "")).strip() or config["redirectUri"]
+    state = str(payload.get("state", "")).strip()
+    expected_state = str(session.get(SPOTIFY_OAUTH_STATE_KEY, "")).strip()
+    verifier = str(session.get(SPOTIFY_OAUTH_PKCE_VERIFIER_KEY, "")).strip() or str(payload.get("codeVerifier", "")).strip()
+    expected_redirect_uri = str(session.get(SPOTIFY_OAUTH_REDIRECT_URI_KEY, "")).strip() or config["redirectUri"]
+    redirect_uri = expected_redirect_uri
+    provided_redirect_uri = str(payload.get("redirectUri", "")).strip()
+    if provided_redirect_uri and provided_redirect_uri != expected_redirect_uri:
+        return jsonify({"error": "Spotify redirect URI mismatch. Check SPOTIFY_REDIRECT_URI and dashboard settings."}), 400
 
     if not code or not verifier:
         return jsonify({"error": "Missing Spotify authorization code or PKCE verifier."}), 400
 
+    if expected_state and state and state != expected_state:
+        clear_spotify_oauth_pending_state()
+        return jsonify({"error": "Spotify sign-in state mismatch. Please connect again."}), 400
+
+    log_spotify_oauth_step("exchange_code", "api_exchange")
     try:
         token_data = spotify_token_request(
             {
@@ -1700,6 +1736,7 @@ def spotify_exchange_code():
             }
         )
     except RuntimeError as error:
+        log_spotify_oauth_step("exchange_failed", str(error))
         return jsonify({"error": str(error)}), 400
 
     save_spotify_session_data(
@@ -1711,29 +1748,74 @@ def spotify_exchange_code():
             **token_data,
         }
     )
+    clear_spotify_oauth_pending_state()
+    log_spotify_oauth_step("authenticated", "api_exchange_ok")
     return jsonify({"ok": True})
 
 
 @app.get("/spotify/callback")
 def spotify_callback():
     ensure_directories()
+    config = get_spotify_oauth_config()
     error_value = str(request.args.get("error", "")).strip()
     if error_value:
+        clear_spotify_oauth_pending_state()
+        log_spotify_oauth_step("callback_error", error_value)
         return redirect(url_for("index", spotify="error", spotify_error=f"Spotify authorization failed: {error_value}"))
 
     code = str(request.args.get("code", "")).strip()
     state = str(request.args.get("state", "")).strip()
+    expected_state = str(session.get(SPOTIFY_OAUTH_STATE_KEY, "")).strip()
+    verifier = str(session.get(SPOTIFY_OAUTH_PKCE_VERIFIER_KEY, "")).strip()
+    redirect_uri = str(session.get(SPOTIFY_OAUTH_REDIRECT_URI_KEY, "")).strip() or config["redirectUri"]
     if not code or not state:
+        clear_spotify_oauth_pending_state()
+        log_spotify_oauth_step("callback_invalid", "missing_code_or_state")
         return redirect(url_for("index", spotify="error", spotify_error="Spotify callback validation failed. Try connecting again."))
-    return redirect(url_for("index", spotify="callback", spotify_code=code, spotify_state=state))
+    if not expected_state or state != expected_state:
+        clear_spotify_oauth_pending_state()
+        log_spotify_oauth_step("callback_invalid", "state_mismatch")
+        return redirect(url_for("index", spotify="error", spotify_error="Spotify sign-in state mismatch. Please connect again."))
+    if not verifier:
+        clear_spotify_oauth_pending_state()
+        log_spotify_oauth_step("callback_invalid", "missing_pkce_verifier")
+        return redirect(url_for("index", spotify="error", spotify_error="Spotify sign-in session expired. Please connect again."))
+
+    log_spotify_oauth_step("callback_received", "exchanging_token")
+    try:
+        token_data = spotify_token_request(
+            {
+                "client_id": config["clientId"],
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "code_verifier": verifier,
+            }
+        )
+    except RuntimeError as error:
+        clear_spotify_oauth_pending_state()
+        log_spotify_oauth_step("exchange_failed", str(error))
+        return redirect(url_for("index", spotify="error", spotify_error=str(error)))
+
+    save_spotify_session_data(
+        {
+            "connected_at": datetime.now().isoformat(),
+            "client_id": config["clientId"],
+            "redirect_uri": redirect_uri,
+            "scopes": config["scopes"],
+            **token_data,
+        }
+    )
+    clear_spotify_oauth_pending_state()
+    log_spotify_oauth_step("authenticated", "callback_exchange_ok")
+    return redirect(url_for("index", spotify="connected"))
 
 
 @app.post("/api/spotify/disconnect")
 def disconnect_spotify():
     ensure_directories()
     clear_spotify_session_data()
-    session.pop("spotify_oauth_state", None)
-    session.pop("spotify_pkce_verifier", None)
+    clear_spotify_oauth_pending_state()
     return jsonify({"ok": True})
 
 

@@ -328,7 +328,11 @@ let spotifySdkPlayer = null;
 let spotifySdkDeviceId = "";
 let spotifySdkReady = false;
 let spotifySdkInitPromise = null;
+let spotifyConnectInFlight = false;
+let spotifyAuthCallbackHandled = false;
 const SPOTIFY_PKCE_STORAGE_KEY = "swagpods.spotify.pkce";
+const SPOTIFY_LIBRARY_CACHE_KEY = "swagpods.spotify.library-cache.v1";
+const SPOTIFY_LIBRARY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
 const haptics = (() => {
   const lastFireTimes = new Map();
@@ -1692,6 +1696,11 @@ async function fetchJson(url, options = {}) {
   return payload;
 }
 
+function logSpotifyAuth(step, detail = "") {
+  const suffix = detail ? ` | ${detail}` : "";
+  console.log(`[Spotify Auth] ${step}${suffix}`);
+}
+
 function isSpotifyRemoteSong(song = currentSong) {
   return Boolean(song && song.source === "spotify");
 }
@@ -1732,6 +1741,55 @@ function clearSpotifyPkceState() {
     return;
   }
   window.sessionStorage.removeItem(SPOTIFY_PKCE_STORAGE_KEY);
+}
+
+function loadSpotifyLibraryCache() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return null;
+  }
+  try {
+    const value = window.localStorage.getItem(SPOTIFY_LIBRARY_CACHE_KEY);
+    const payload = value ? JSON.parse(value) : null;
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+    const savedAt = Number(payload.savedAt || 0);
+    if (!savedAt || Date.now() - savedAt > SPOTIFY_LIBRARY_CACHE_MAX_AGE_MS) {
+      return null;
+    }
+    return payload;
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveSpotifyLibraryCache(profileName, payload) {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      SPOTIFY_LIBRARY_CACHE_KEY,
+      JSON.stringify({
+        profileName: profileName || "",
+        savedAt: Date.now(),
+        payload,
+      })
+    );
+  } catch (error) {
+    // Ignore storage quota/private-mode errors.
+  }
+}
+
+function clearSpotifyLibraryCache() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(SPOTIFY_LIBRARY_CACHE_KEY);
+  } catch (error) {
+    // Ignore storage errors.
+  }
 }
 
 function isSpotifyLibraryPath(value) {
@@ -3312,7 +3370,24 @@ async function initializeSpotifySdk() {
   return spotifySdkInitPromise;
 }
 
-async function refreshSpotifyLibrary() {
+async function refreshSpotifyLibrary(options = {}) {
+  const { force = false } = options;
+  if (!force && spotifyViewState.connected) {
+    const cached = loadSpotifyLibraryCache();
+    if (cached?.payload && (!cached.profileName || cached.profileName === spotifyViewState.profileName)) {
+      spotifyLibraryData = {
+        playlists: Array.isArray(cached.payload.playlists) ? cached.payload.playlists : [],
+        albums: Array.isArray(cached.payload.albums) ? cached.payload.albums : [],
+        artists: Array.isArray(cached.payload.artists) ? cached.payload.artists : [],
+        tracks: Array.isArray(cached.payload.tracks) ? cached.payload.tracks : [],
+        playlistDetails: {},
+        albumDetails: {},
+        artistDetails: {},
+      };
+      return;
+    }
+  }
+
   const payload = await fetchJson("/api/spotify/library");
   spotifyLibraryData = {
     playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
@@ -3323,6 +3398,12 @@ async function refreshSpotifyLibrary() {
     albumDetails: {},
     artistDetails: {},
   };
+  saveSpotifyLibraryCache(spotifyViewState.profileName, {
+    playlists: spotifyLibraryData.playlists,
+    albums: spotifyLibraryData.albums,
+    artists: spotifyLibraryData.artists,
+    tracks: spotifyLibraryData.tracks,
+  });
 }
 
 async function ensureSpotifyPlaylistDetail(playlistId) {
@@ -3368,6 +3449,18 @@ async function ensureSpotifyArtistDetail(artistId) {
 }
 
 async function connectSpotify() {
+  if (spotifyViewState.connected) {
+    setMessage(
+      spotifyViewState.profileName
+        ? `Spotify Connected: ${spotifyViewState.profileName}`
+        : "Spotify Connected",
+      "success"
+    );
+    return;
+  }
+  if (spotifyConnectInFlight) {
+    return;
+  }
   if (!spotifyViewState.configured) {
     setMessage(
       "Spotify is not configured on the server. Add SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI first.",
@@ -3376,18 +3469,28 @@ async function connectSpotify() {
     return;
   }
 
-  const payload = await fetchJson("/api/spotify/connect", {
-    method: "POST",
-  });
-  if (!payload.authorizeUrl) {
-    throw new Error("Spotify authorize URL was not returned.");
+  spotifyConnectInFlight = true;
+  setMessage("Starting Spotify sign-in...", "success");
+  logSpotifyAuth("Starting Spotify auth");
+  try {
+    const payload = await fetchJson("/api/spotify/connect", {
+      method: "POST",
+    });
+    if (!payload.authorizeUrl) {
+      throw new Error("Spotify authorize URL was not returned.");
+    }
+    saveSpotifyPkceState({
+      state: payload.state || "",
+      codeVerifier: payload.codeVerifier || "",
+      redirectUri: payload.redirectUri || "",
+    });
+    logSpotifyAuth("Redirecting to Spotify", payload.redirectUri || "");
+    window.location.assign(payload.authorizeUrl);
+  } catch (error) {
+    spotifyConnectInFlight = false;
+    logSpotifyAuth("Auth start failed", error.message || "unknown error");
+    throw error;
   }
-  saveSpotifyPkceState({
-    state: payload.state || "",
-    codeVerifier: payload.codeVerifier || "",
-    redirectUri: payload.redirectUri || "",
-  });
-  window.location.assign(payload.authorizeUrl);
 }
 
 async function disconnectSpotify() {
@@ -3395,6 +3498,7 @@ async function disconnectSpotify() {
     method: "POST",
   });
   clearSpotifyPkceState();
+  clearSpotifyLibraryCache();
   stopSpotifyPlayerPolling();
   spotifyPlayerState = normalizeSpotifyPlayerState();
   if (isSpotifyRemoteSong()) {
@@ -3731,28 +3835,52 @@ async function loadPersistedLibrary() {
 
 async function loadSpotifyState() {
   try {
-    if (window.APP_CONFIG?.spotifyAuthState === "callback" && window.APP_CONFIG?.spotifyAuthCode) {
+    const authState = window.APP_CONFIG?.spotifyAuthState || "";
+    const authError = window.APP_CONFIG?.spotifyAuthError || "";
+    const authCode = window.APP_CONFIG?.spotifyAuthCode || "";
+    const authCallbackState = window.APP_CONFIG?.spotifyAuthCallbackState || "";
+
+    if (!spotifyAuthCallbackHandled && authState === "connected") {
+      spotifyAuthCallbackHandled = true;
+      setMessage("Finishing Spotify sign-in...", "success");
+      logSpotifyAuth("Redirect received", "connected");
+      logSpotifyAuth("Code received", "handled on server callback");
+      logSpotifyAuth("Token exchanged", "handled on server callback");
+    } else if (!spotifyAuthCallbackHandled && authState === "callback") {
+      spotifyAuthCallbackHandled = true;
+      setMessage("Finishing Spotify sign-in...", "success");
+      logSpotifyAuth("Redirect received", "callback");
+
       const pkceState = loadSpotifyPkceState();
-      if (!pkceState?.state || !pkceState?.codeVerifier) {
+      if (!authCode) {
+        setMessage("Spotify did not return an authorization code. Try Connect Spotify again.", "error");
+        clearSpotifyPkceState();
+        logSpotifyAuth("Callback error", "missing_code");
+      } else if (!pkceState?.state || !pkceState?.codeVerifier) {
         setMessage("Spotify sign-in expired before it completed. Try Connect Spotify again.", "error");
         clearSpotifyPkceState();
-      } else if (pkceState.state !== window.APP_CONFIG.spotifyAuthCallbackState) {
+        logSpotifyAuth("Callback error", "missing_pkce_state");
+      } else if (pkceState.state !== authCallbackState) {
         setMessage("Spotify sign-in state did not match. Try Connect Spotify again.", "error");
         clearSpotifyPkceState();
+        logSpotifyAuth("Callback error", "state_mismatch");
       } else {
+        logSpotifyAuth("Code received");
         await fetchJson("/api/spotify/exchange", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            code: window.APP_CONFIG.spotifyAuthCode,
+            code: authCode,
             codeVerifier: pkceState.codeVerifier,
             redirectUri: pkceState.redirectUri,
+            state: authCallbackState,
           }),
         });
         clearSpotifyPkceState();
         window.APP_CONFIG.spotifyAuthState = "connected";
+        logSpotifyAuth("Token exchanged");
       }
     }
 
@@ -3774,6 +3902,10 @@ async function loadSpotifyState() {
       spotifyPlayerState = normalizeSpotifyPlayerState();
     }
     if (window.APP_CONFIG?.spotifyAuthState === "connected" && spotifyViewState.connected) {
+      logSpotifyAuth(
+        "User authenticated",
+        spotifyViewState.profileName ? `profile=${spotifyViewState.profileName}` : "profile=unknown"
+      );
       setMessage(
         spotifyViewState.profileName
           ? `Spotify Connected: ${spotifyViewState.profileName}`
@@ -3785,20 +3917,28 @@ async function loadSpotifyState() {
       screenMode = "library";
       await refreshSpotifyLibrary();
     } else if (window.APP_CONFIG?.spotifyAuthState === "connected" && !spotifyViewState.connected) {
-      window.setTimeout(() => {
-        void loadSpotifyState();
-      }, 600);
+      setMessage(
+        "Spotify sign-in completed but the session was not available. Check redirect URI/cookies, then connect again.",
+        "error"
+      );
+      logSpotifyAuth("Auth incomplete", "status_disconnected_after_callback");
     } else if (window.APP_CONFIG?.spotifyAuthError) {
       setMessage(window.APP_CONFIG.spotifyAuthError, "error");
+      logSpotifyAuth("Auth error", window.APP_CONFIG.spotifyAuthError);
     } else if (spotifyViewState.error) {
       setMessage(spotifyViewState.error, "error");
     }
     if (window.APP_CONFIG?.spotifyAuthState || window.APP_CONFIG?.spotifyAuthError) {
       const cleanUrl = `${window.location.origin}${window.location.pathname}`;
       window.history.replaceState({}, document.title, cleanUrl);
+      window.APP_CONFIG.spotifyAuthState = "";
+      window.APP_CONFIG.spotifyAuthError = "";
+      window.APP_CONFIG.spotifyAuthCode = "";
+      window.APP_CONFIG.spotifyAuthCallbackState = "";
     }
     syncUi();
   } catch (error) {
+    logSpotifyAuth("Auth flow failed", error.message || "unknown error");
     setMessage(error.message, "error");
   }
 }
