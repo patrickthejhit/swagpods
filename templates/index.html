@@ -200,7 +200,37 @@
                 </div>
                 <div class="library-viewport">
                   <div id="library-selection-bar" class="library-selection-bar hidden" aria-hidden="true"></div>
+                  <input id="spotify-search-input" class="visually-hidden" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Search Spotify">
                   <ul id="library-list" class="library-list" aria-label="Song library"></ul>
+                </div>
+              </section>
+
+              <section id="coverflow-panel" class="screen-state coverflow-panel hidden" aria-label="Spotify cover flow">
+                <div class="track-header">
+                  <div class="screen-header-row">
+                    <div>
+                      <p class="track-label">Spotify</p>
+                      <p id="coverflow-title" class="track-name">Cover Flow</p>
+                    </div>
+                    <div class="battery-indicator" aria-hidden="true">
+                      <span class="battery-shell">
+                        <span class="battery-level"></span>
+                      </span>
+                      <span class="battery-cap"></span>
+                    </div>
+                  </div>
+                  <p id="coverflow-summary" class="guess-summary">Browse albums with the wheel.</p>
+                </div>
+                <div class="coverflow-stage">
+                  <div class="coverflow-cards">
+                    <figure id="coverflow-left" class="coverflow-card is-side" aria-hidden="true"></figure>
+                    <figure id="coverflow-center" class="coverflow-card is-center"></figure>
+                    <figure id="coverflow-right" class="coverflow-card is-side" aria-hidden="true"></figure>
+                  </div>
+                  <div class="coverflow-meta">
+                    <p id="coverflow-album" class="coverflow-album">No Albums</p>
+                    <p id="coverflow-artist" class="coverflow-artist"></p>
+                  </div>
                 </div>
               </section>
 
@@ -478,11 +508,17 @@
     <script>
       window.APP_CONFIG = {
         exportDir: {{ export_dir | tojson }},
+        spotifyClientId: {{ spotify_client_id | tojson }},
+        spotifyRedirectUri: {{ spotify_redirect_uri | tojson }},
+        spotifyScopes: {{ spotify_scopes | tojson }},
         spotifyAuthState: {{ spotify_auth_state | tojson }},
         spotifyAuthError: {{ spotify_auth_error | tojson }},
         spotifyAuthCode: {{ spotify_auth_code | tojson }},
         spotifyAuthCallbackState: {{ spotify_auth_callback_state | tojson }},
       };
+    </script>
+    <script>
+      window.onSpotifyWebPlaybackSDKReady = window.onSpotifyWebPlaybackSDKReady || function () {};
     </script>
     <script src="https://sdk.scdn.co/spotify-player.js"></script>
     <script src="{{ url_for('static', filename='app.js', v=asset_version) }}"></script>

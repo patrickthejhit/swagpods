@@ -47,26 +47,17 @@ SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 SPOTIFY_DEFAULT_CLIENT_ID = "1fd5039188e3488b940933da79591fe1"
 SPOTIFY_DEFAULT_SCOPES = (
-    "streaming "
     "playlist-read-private "
     "playlist-read-collaborative "
+    "user-follow-read "
     "user-library-read "
+    "streaming "
     "user-read-playback-state "
     "user-read-currently-playing "
     "user-modify-playback-state"
 )
-SPOTIFY_REQUIRED_SCOPES = (
-    "streaming",
-    "user-read-playback-state",
-    "user-read-currently-playing",
-    "user-modify-playback-state",
-)
 SPOTIFY_DEFAULT_REDIRECT_PATH = "/spotify/callback"
 SPOTIFY_USER_AGENT = "swagpods-spotify-connect/1.0"
-SPOTIFY_OAUTH_STATE_KEY = "spotify_oauth_state"
-SPOTIFY_OAUTH_PKCE_VERIFIER_KEY = "spotify_pkce_verifier"
-SPOTIFY_OAUTH_REDIRECT_URI_KEY = "spotify_oauth_redirect_uri"
-SPOTIFY_OAUTH_STARTED_AT_KEY = "spotify_oauth_started_at"
 
 AUDIO_FIELD_MAP = {
     "title": ("title", TIT2),
@@ -204,19 +195,17 @@ def get_spotify_oauth_config() -> dict[str, str]:
     if not redirect_uri:
         redirect_uri = f"{get_app_base_url()}{SPOTIFY_DEFAULT_REDIRECT_PATH}"
 
-    requested_scopes = os.environ.get("SPOTIFY_SCOPES", SPOTIFY_DEFAULT_SCOPES).strip() or SPOTIFY_DEFAULT_SCOPES
-    scope_items = [item.strip() for item in requested_scopes.split() if item.strip()]
-    scope_set = set(scope_items)
-    for required_scope in SPOTIFY_REQUIRED_SCOPES:
-        if required_scope not in scope_set:
-            scope_items.append(required_scope)
-            scope_set.add(required_scope)
-    normalized_scopes = " ".join(scope_items)
+    configured_scopes = os.environ.get("SPOTIFY_SCOPES", "").strip()
+    requested_scopes = {
+        scope
+        for scope in f"{configured_scopes} {SPOTIFY_DEFAULT_SCOPES}".split()
+        if scope
+    }
 
     return {
         "clientId": os.environ.get("SPOTIFY_CLIENT_ID", "").strip() or SPOTIFY_DEFAULT_CLIENT_ID,
         "redirectUri": redirect_uri,
-        "scopes": normalized_scopes,
+        "scopes": " ".join(sorted(requested_scopes)) or SPOTIFY_DEFAULT_SCOPES,
     }
 
 
@@ -234,6 +223,9 @@ def get_spotify_session_path() -> Path:
 
 
 def load_spotify_session_data() -> dict[str, object]:
+    payload = session.get("spotify_session_data")
+    if isinstance(payload, dict):
+        return payload
     path = get_spotify_session_path()
     if not path.exists():
         return {}
@@ -244,11 +236,13 @@ def load_spotify_session_data() -> dict[str, object]:
 
 
 def save_spotify_session_data(payload: dict[str, object]) -> None:
+    session["spotify_session_data"] = payload
     path = get_spotify_session_path()
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def clear_spotify_session_data() -> None:
+    session.pop("spotify_session_data", None)
     path = get_spotify_session_path()
     if path.exists():
         try:
@@ -257,23 +251,31 @@ def clear_spotify_session_data() -> None:
             pass
 
 
+def load_spotify_oauth_pending() -> dict[str, str]:
+    payload = session.get("spotify_oauth_pending")
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "state": str(payload.get("state", "")).strip(),
+        "code_verifier": str(payload.get("code_verifier", "")).strip(),
+        "redirect_uri": str(payload.get("redirect_uri", "")).strip(),
+    }
+
+
+def save_spotify_oauth_pending(payload: dict[str, str]) -> None:
+    session["spotify_oauth_pending"] = {
+        "state": str(payload.get("state", "")).strip(),
+        "code_verifier": str(payload.get("code_verifier", "")).strip(),
+        "redirect_uri": str(payload.get("redirect_uri", "")).strip(),
+    }
+
+
+def clear_spotify_oauth_pending() -> None:
+    session.pop("spotify_oauth_pending", None)
+
+
 def spotify_is_configured() -> bool:
     return bool(get_spotify_oauth_config()["clientId"])
-
-
-def log_spotify_oauth_step(step: str, detail: str = "") -> None:
-    timestamp = datetime.now().isoformat(timespec="seconds")
-    message = f"[spotify-oauth] {timestamp} {step}"
-    if detail:
-        message = f"{message} | {detail}"
-    print(message, flush=True)
-
-
-def clear_spotify_oauth_pending_state() -> None:
-    session.pop(SPOTIFY_OAUTH_STATE_KEY, None)
-    session.pop(SPOTIFY_OAUTH_PKCE_VERIFIER_KEY, None)
-    session.pop(SPOTIFY_OAUTH_REDIRECT_URI_KEY, None)
-    session.pop(SPOTIFY_OAUTH_STARTED_AT_KEY, None)
 
 
 def spotify_token_request(form_data: dict[str, str]) -> dict[str, object]:
@@ -377,11 +379,9 @@ def get_valid_spotify_access_token() -> str:
     return str(refreshed["access_token"])
 
 
-def fetch_spotify_profile(access_token: str) -> dict[str, object]:
-    return spotify_api_get(access_token, "/me")
-
-
-def fetch_spotify_playlist_summaries(access_token: str) -> list[dict[str, object]]:
+def fetch_spotify_profile_and_playlists() -> tuple[dict[str, object], list[dict[str, object]]]:
+    access_token = get_valid_spotify_access_token()
+    profile = spotify_api_get(access_token, "/me")
     playlists: list[dict[str, object]] = []
     next_url = f"{SPOTIFY_API_BASE}/me/playlists?limit=50"
     while next_url:
@@ -389,30 +389,9 @@ def fetch_spotify_playlist_summaries(access_token: str) -> list[dict[str, object
         for item in payload.get("items", []):
             if not isinstance(item, dict):
                 continue
-            owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
-            playlists.append(
-                {
-                    "id": str(item.get("id", "")).strip(),
-                    "name": str(item.get("name", "")).strip() or "Untitled Playlist",
-                    "trackCount": int(((item.get("tracks") or {}).get("total")) or 0),
-                    "spotifyUrl": str(((item.get("external_urls") or {}).get("spotify")) or "").strip(),
-                    "ownerName": str(owner.get("display_name") or owner.get("id") or "").strip(),
-                }
-            )
+            playlists.append(build_spotify_playlist_payload(item))
         next_url = str(payload.get("next") or "")
-    return playlists
-
-
-def fetch_spotify_profile_and_playlists(access_token: str | None = None) -> tuple[dict[str, object], list[dict[str, object]]]:
-    resolved_access_token = access_token or get_valid_spotify_access_token()
-    profile = fetch_spotify_profile(resolved_access_token)
-    playlists = fetch_spotify_playlist_summaries(resolved_access_token)
     return profile, playlists
-
-
-def fetch_spotify_playlist_count(access_token: str) -> int:
-    payload = spotify_api_get(access_token, "/me/playlists", params={"limit": 1})
-    return int(payload.get("total", 0) or 0)
 
 
 def paginate_spotify_items(access_token: str, initial_url: str) -> list[dict[str, object]]:
@@ -463,6 +442,14 @@ def build_spotify_artist_payload(artist: dict[str, object]) -> dict[str, object]
     }
 
 
+def get_spotify_playlist_item_total(item: dict[str, object]) -> int:
+    for key in ("items", "tracks"):
+        payload = item.get(key)
+        if isinstance(payload, dict):
+            return int(payload.get("total", 0) or 0)
+    return 0
+
+
 def build_spotify_playlist_payload(item: dict[str, object]) -> dict[str, object]:
     owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
     images = item.get("images") if isinstance(item.get("images"), list) else []
@@ -476,7 +463,7 @@ def build_spotify_playlist_payload(item: dict[str, object]) -> dict[str, object]
     return {
         "id": str(item.get("id", "")).strip(),
         "name": str(item.get("name", "")).strip() or "Untitled Playlist",
-        "trackCount": int(((item.get("tracks") or {}).get("total")) or 0),
+        "trackCount": get_spotify_playlist_item_total(item),
         "spotifyUrl": str(((item.get("external_urls") or {}).get("spotify")) or "").strip(),
         "ownerName": str(owner.get("display_name") or owner.get("id") or "").strip(),
         "artworkUrl": artwork_url,
@@ -486,10 +473,20 @@ def build_spotify_playlist_payload(item: dict[str, object]) -> dict[str, object]
 
 def fetch_spotify_library_sections() -> dict[str, object]:
     access_token = get_valid_spotify_access_token()
-    profile, playlists = fetch_spotify_profile_and_playlists(access_token)
+    profile, playlists = fetch_spotify_profile_and_playlists()
+    warnings: list[str] = []
 
-    album_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/albums?limit=50")
-    saved_track_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/tracks?limit=50")
+    try:
+        album_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/albums?limit=50")
+    except RuntimeError as error:
+        album_items = []
+        warnings.append(str(error))
+
+    try:
+        saved_track_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/tracks?limit=50")
+    except RuntimeError as error:
+        saved_track_items = []
+        warnings.append(str(error))
 
     albums = [
         build_spotify_album_payload(item["album"])
@@ -521,59 +518,28 @@ def fetch_spotify_library_sections() -> dict[str, object]:
         "albums": albums,
         "artists": sorted(artist_index.values(), key=lambda item: str(item["name"]).lower()),
         "tracks": tracks,
+        "warnings": warnings,
     }
 
 
-def fetch_spotify_search_results(query: str) -> dict[str, object]:
-    access_token = get_valid_spotify_access_token()
-    payload = spotify_api_get(
-        access_token,
-        "/search",
-        params={
-            "q": query,
-            "type": "track,playlist,album,artist",
-            "limit": 10,
-        },
-    )
-
-    tracks = [
-        build_spotify_track_payload(item)
-        for item in ((payload.get("tracks") or {}).get("items") or [])
-        if isinstance(item, dict)
-    ]
-    playlists = [
-        build_spotify_playlist_payload(item)
-        for item in ((payload.get("playlists") or {}).get("items") or [])
-        if isinstance(item, dict)
-    ]
-    albums = [
-        build_spotify_album_payload(item)
-        for item in ((payload.get("albums") or {}).get("items") or [])
-        if isinstance(item, dict)
-    ]
-    artists = [
-        build_spotify_artist_payload(item)
-        for item in ((payload.get("artists") or {}).get("items") or [])
-        if isinstance(item, dict)
-    ]
-
-    return {
-        "query": query,
-        "tracks": tracks,
-        "playlists": playlists,
-        "albums": albums,
-        "artists": artists,
-    }
+def extract_spotify_track_from_collection_item(item: dict[str, object]) -> dict[str, object] | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("item", "track"):
+        candidate = item.get(key)
+        if isinstance(candidate, dict) and str(candidate.get("type", "track")).strip() in {"", "track"}:
+            return candidate
+    return None
 
 
 def fetch_spotify_playlist_tracks(playlist_id: str) -> dict[str, object]:
     access_token = get_valid_spotify_access_token()
     details = spotify_api_get(access_token, f"/playlists/{playlist_id}")
-    items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/tracks?limit=100")
+    items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/items?limit=50")
     tracks = [
-        build_spotify_track_payload(item["track"])
+        build_spotify_track_payload(track)
         for item in items
-        if isinstance(item.get("track"), dict)
+        if (track := extract_spotify_track_from_collection_item(item)) is not None
     ]
     return {
         "id": playlist_id,
@@ -672,10 +638,14 @@ def fetch_spotify_player_state_payload() -> dict[str, object]:
             "progressMs": 0,
             "deviceName": "",
             "deviceType": "",
+            "deviceId": "",
+            "contextUri": "",
+            "shuffleEnabled": False,
             "track": None,
         }
 
     device = playback.get("device") if isinstance(playback.get("device"), dict) else {}
+    context = playback.get("context") if isinstance(playback.get("context"), dict) else {}
     item = playback.get("item") if isinstance(playback.get("item"), dict) else {}
     return {
         "connected": True,
@@ -685,13 +655,15 @@ def fetch_spotify_player_state_payload() -> dict[str, object]:
         "deviceName": str(device.get("name", "")).strip(),
         "deviceType": str(device.get("type", "")).strip(),
         "deviceId": str(device.get("id", "")).strip(),
+        "contextUri": str(context.get("uri", "")).strip(),
+        "shuffleEnabled": bool(playback.get("shuffle_state")),
         "track": build_spotify_track_payload(item) if item else None,
     }
 
 
-def fetch_spotify_devices_payload(access_token: str | None = None) -> list[dict[str, object]]:
-    resolved_access_token = access_token or get_valid_spotify_access_token()
-    payload = spotify_api_get(resolved_access_token, "/me/player/devices")
+def fetch_spotify_devices_payload() -> list[dict[str, object]]:
+    access_token = get_valid_spotify_access_token()
+    payload = spotify_api_get(access_token, "/me/player/devices")
     devices: list[dict[str, object]] = []
     for item in payload.get("devices", []):
         if not isinstance(item, dict):
@@ -708,7 +680,17 @@ def fetch_spotify_devices_payload(access_token: str | None = None) -> list[dict[
     return devices
 
 
-def ensure_spotify_target_device(access_token: str) -> str:
+def transfer_spotify_playback(access_token: str, device_id: str, *, play: bool = False) -> None:
+    spotify_api_request(
+        access_token,
+        "PUT",
+        "/me/player",
+        body={"device_ids": [device_id], "play": play},
+    )
+    time.sleep(0.35)
+
+
+def ensure_spotify_target_device(access_token: str, preferred_device_id: str = "") -> str:
     devices_payload = spotify_api_get(access_token, "/me/player/devices")
     devices = [item for item in devices_payload.get("devices", []) if isinstance(item, dict)]
     available = [
@@ -718,14 +700,28 @@ def ensure_spotify_target_device(access_token: str) -> str:
     ]
     if not available:
         raise RuntimeError(
-            "No available Spotify device was found. Open Spotify on your phone, desktop, or browser first."
+            "Select a playback device in Spotify to start music."
         )
+
+    preferred = next(
+        (
+            item
+            for item in available
+            if str(item.get("id", "")).strip() == preferred_device_id
+        ),
+        None,
+    )
+    if preferred:
+        preferred_id = str(preferred.get("id", "")).strip()
+        if not bool(preferred.get("is_active")):
+            transfer_spotify_playback(access_token, preferred_id, play=False)
+        return preferred_id
 
     active = next((item for item in available if bool(item.get("is_active"))), None)
     if active:
         return str(active.get("id", "")).strip()
 
-    preferred = next(
+    fallback = next(
         (
             item
             for item in available
@@ -733,13 +729,8 @@ def ensure_spotify_target_device(access_token: str) -> str:
         ),
         available[0],
     )
-    device_id = str(preferred.get("id", "")).strip()
-    spotify_api_request(
-        access_token,
-        "PUT",
-        "/me/player",
-        body={"device_ids": [device_id], "play": True},
-    )
+    device_id = str(fallback.get("id", "")).strip()
+    transfer_spotify_playback(access_token, device_id, play=False)
     return device_id
 
 
@@ -747,24 +738,15 @@ def get_spotify_status_payload() -> dict[str, object]:
     config = get_spotify_oauth_config()
     status: dict[str, object] = {
         "configured": bool(config["clientId"]),
-        "authenticated": False,
         "connected": False,
-        "authState": "not_logged_in",
         "profileName": "",
         "profileImageUrl": "",
         "playlists": [],
-        "playlistCount": 0,
-        "devices": [],
-        "hasActiveDevice": False,
-        "activeDeviceName": "",
-        "sessionScopes": "",
-        "needsReconnect": False,
         "error": "",
         "scopes": config["scopes"],
     }
 
     if not status["configured"]:
-        status["authState"] = "not_configured"
         status["error"] = "Spotify is not configured yet. Add SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI."
         return status
 
@@ -772,34 +754,15 @@ def get_spotify_status_payload() -> dict[str, object]:
     if not session_data:
         return status
 
-    status["authenticated"] = True
-    status["authState"] = "authenticated"
-    session_scopes_raw = str(session_data.get("scope") or session_data.get("scopes") or "").strip()
-    status["sessionScopes"] = session_scopes_raw
-    session_scopes = {item.strip() for item in session_scopes_raw.split() if item.strip()}
-    missing_required = [scope for scope in SPOTIFY_REQUIRED_SCOPES if scope not in session_scopes]
-    if missing_required:
-        status["authState"] = "needs_reconnect"
-        status["needsReconnect"] = True
-        status["error"] = (
-            "Spotify session is missing required playback scopes "
-            f"({', '.join(missing_required)}). Please reconnect Spotify."
-        )
-        return status
+    # Treat a stored token session as connected even if profile hydration fails.
+    # This avoids dropping back into the Connect Spotify loop on transient API errors
+    # and lets the UI surface the actual Spotify error instead.
+    status["connected"] = True
+    status["profileName"] = str(session_data.get("profile_name", "")).strip()
 
     try:
-        access_token = get_valid_spotify_access_token()
+        profile, playlists = fetch_spotify_profile_and_playlists()
     except RuntimeError as error:
-        status["authState"] = "token_expired"
-        status["error"] = str(error)
-        return status
-
-    try:
-        profile = fetch_spotify_profile(access_token)
-        playlist_count = fetch_spotify_playlist_count(access_token)
-        devices = fetch_spotify_devices_payload(access_token)
-    except RuntimeError as error:
-        status["authState"] = "player_unavailable"
         status["error"] = str(error)
         return status
 
@@ -812,16 +775,14 @@ def get_spotify_status_payload() -> dict[str, object]:
                 image_url = maybe_url
                 break
 
-    status["connected"] = True
     status["profileName"] = str(profile.get("display_name") or profile.get("id") or "Spotify User").strip()
     status["profileImageUrl"] = image_url
-    status["playlists"] = []
-    status["playlistCount"] = playlist_count
-    status["devices"] = devices
-    status["hasActiveDevice"] = any(bool(item.get("isActive")) for item in devices)
-    active_device = next((item for item in devices if bool(item.get("isActive"))), None)
-    status["activeDeviceName"] = str((active_device or {}).get("name") or "").strip()
+    status["playlists"] = playlists
     status["webPlaybackSupported"] = True
+    session_data["profile_name"] = status["profileName"]
+    if image_url:
+        session_data["profile_image_url"] = image_url
+    save_spotify_session_data(session_data)
     return status
 
 
@@ -1595,11 +1556,15 @@ def build_video_result_metadata(metadata: dict[str, str]) -> dict[str, str]:
 @app.route("/")
 def index():
     ensure_directories()
+    spotify_config = get_spotify_oauth_config()
     return render_template(
         "index.html",
         export_dir=str(EXPORT_DIR),
         upload_dir=str(UPLOAD_DIR),
         asset_version=get_static_asset_version(),
+        spotify_client_id=spotify_config["clientId"],
+        spotify_redirect_uri=spotify_config["redirectUri"],
+        spotify_scopes=spotify_config["scopes"],
         spotify_auth_state=str(request.args.get("spotify", "")).strip(),
         spotify_auth_error=str(request.args.get("spotify_error", "")).strip(),
         spotify_auth_code=str(request.args.get("spotify_code", "")).strip(),
@@ -1748,18 +1713,6 @@ def get_spotify_library():
         return jsonify({"error": str(error)}), 400
 
 
-@app.get("/api/spotify/search")
-def search_spotify_library():
-    ensure_directories()
-    query = str(request.args.get("q", "")).strip()
-    if not query:
-        return jsonify({"error": "Enter a Spotify search query."}), 400
-    try:
-        return jsonify(fetch_spotify_search_results(query))
-    except RuntimeError as error:
-        return jsonify({"error": str(error)}), 400
-
-
 @app.get("/api/spotify/playlists/<playlist_id>")
 def get_spotify_playlist_detail(playlist_id: str):
     ensure_directories()
@@ -1807,18 +1760,17 @@ def start_spotify_connect():
         "code_challenge": challenge,
         "state": state,
     }
+    save_spotify_oauth_pending(
+        {
+            "state": state,
+            "code_verifier": verifier,
+            "redirect_uri": config["redirectUri"],
+        }
+    )
     authorize_url = f"{SPOTIFY_AUTH_URL}?{urllib.parse.urlencode(params)}"
-    session[SPOTIFY_OAUTH_STATE_KEY] = state
-    session[SPOTIFY_OAUTH_PKCE_VERIFIER_KEY] = verifier
-    session[SPOTIFY_OAUTH_REDIRECT_URI_KEY] = config["redirectUri"]
-    session[SPOTIFY_OAUTH_STARTED_AT_KEY] = int(time.time())
-    session.modified = True
-    log_spotify_oauth_step("start_auth", f"redirect_uri={config['redirectUri']}")
     return jsonify(
         {
             "authorizeUrl": authorize_url,
-            "codeVerifier": verifier,
-            "state": state,
             "redirectUri": config["redirectUri"],
         }
     )
@@ -1830,23 +1782,17 @@ def spotify_exchange_code():
     config = get_spotify_oauth_config()
     payload = request.get_json(silent=True) or {}
     code = str(payload.get("code", "")).strip()
-    state = str(payload.get("state", "")).strip()
-    expected_state = str(session.get(SPOTIFY_OAUTH_STATE_KEY, "")).strip()
-    verifier = str(session.get(SPOTIFY_OAUTH_PKCE_VERIFIER_KEY, "")).strip() or str(payload.get("codeVerifier", "")).strip()
-    expected_redirect_uri = str(session.get(SPOTIFY_OAUTH_REDIRECT_URI_KEY, "")).strip() or config["redirectUri"]
-    redirect_uri = expected_redirect_uri
-    provided_redirect_uri = str(payload.get("redirectUri", "")).strip()
-    if provided_redirect_uri and provided_redirect_uri != expected_redirect_uri:
-        return jsonify({"error": "Spotify redirect URI mismatch. Check SPOTIFY_REDIRECT_URI and dashboard settings."}), 400
+    callback_state = str(payload.get("state", "")).strip()
+    pending = load_spotify_oauth_pending()
+    verifier = str(payload.get("codeVerifier", "")).strip() or pending.get("code_verifier", "")
+    redirect_uri = str(payload.get("redirectUri", "")).strip() or pending.get("redirect_uri", "") or config["redirectUri"]
 
     if not code or not verifier:
         return jsonify({"error": "Missing Spotify authorization code or PKCE verifier."}), 400
+    if callback_state and pending.get("state") and callback_state != pending.get("state"):
+        clear_spotify_oauth_pending()
+        return jsonify({"error": "Spotify sign-in state did not match. Try Connect Spotify again."}), 400
 
-    if expected_state and state and state != expected_state:
-        clear_spotify_oauth_pending_state()
-        return jsonify({"error": "Spotify sign-in state mismatch. Please connect again."}), 400
-
-    log_spotify_oauth_step("exchange_code", "api_exchange")
     try:
         token_data = spotify_token_request(
             {
@@ -1858,86 +1804,31 @@ def spotify_exchange_code():
             }
         )
     except RuntimeError as error:
-        log_spotify_oauth_step("exchange_failed", str(error))
         return jsonify({"error": str(error)}), 400
 
-    save_spotify_session_data(
-        {
-            "connected_at": datetime.now().isoformat(),
-            "client_id": config["clientId"],
-            "redirect_uri": redirect_uri,
-            "scopes": config["scopes"],
-            **token_data,
-        }
-    )
-    clear_spotify_oauth_pending_state()
-    log_spotify_oauth_step("authenticated", "api_exchange_ok")
-    return jsonify({"ok": True})
+    clear_spotify_oauth_pending()
+    return jsonify(token_data)
 
 
 @app.get("/spotify/callback")
 def spotify_callback():
     ensure_directories()
-    config = get_spotify_oauth_config()
     error_value = str(request.args.get("error", "")).strip()
     if error_value:
-        clear_spotify_oauth_pending_state()
-        log_spotify_oauth_step("callback_error", error_value)
         return redirect(url_for("index", spotify="error", spotify_error=f"Spotify authorization failed: {error_value}"))
 
     code = str(request.args.get("code", "")).strip()
     state = str(request.args.get("state", "")).strip()
-    expected_state = str(session.get(SPOTIFY_OAUTH_STATE_KEY, "")).strip()
-    verifier = str(session.get(SPOTIFY_OAUTH_PKCE_VERIFIER_KEY, "")).strip()
-    redirect_uri = str(session.get(SPOTIFY_OAUTH_REDIRECT_URI_KEY, "")).strip() or config["redirectUri"]
     if not code or not state:
-        clear_spotify_oauth_pending_state()
-        log_spotify_oauth_step("callback_invalid", "missing_code_or_state")
         return redirect(url_for("index", spotify="error", spotify_error="Spotify callback validation failed. Try connecting again."))
-    if not expected_state or state != expected_state:
-        clear_spotify_oauth_pending_state()
-        log_spotify_oauth_step("callback_invalid", "state_mismatch")
-        return redirect(url_for("index", spotify="error", spotify_error="Spotify sign-in state mismatch. Please connect again."))
-    if not verifier:
-        clear_spotify_oauth_pending_state()
-        log_spotify_oauth_step("callback_invalid", "missing_pkce_verifier")
-        return redirect(url_for("index", spotify="error", spotify_error="Spotify sign-in session expired. Please connect again."))
-
-    log_spotify_oauth_step("callback_received", "exchanging_token")
-    try:
-        token_data = spotify_token_request(
-            {
-                "client_id": config["clientId"],
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "code_verifier": verifier,
-            }
-        )
-    except RuntimeError as error:
-        clear_spotify_oauth_pending_state()
-        log_spotify_oauth_step("exchange_failed", str(error))
-        return redirect(url_for("index", spotify="error", spotify_error=str(error)))
-
-    save_spotify_session_data(
-        {
-            "connected_at": datetime.now().isoformat(),
-            "client_id": config["clientId"],
-            "redirect_uri": redirect_uri,
-            "scopes": config["scopes"],
-            **token_data,
-        }
-    )
-    clear_spotify_oauth_pending_state()
-    log_spotify_oauth_step("authenticated", "callback_exchange_ok")
-    return redirect(url_for("index", spotify="connected"))
+    return redirect(url_for("index", spotify="callback", spotify_code=code, spotify_state=state))
 
 
 @app.post("/api/spotify/disconnect")
 def disconnect_spotify():
     ensure_directories()
     clear_spotify_session_data()
-    clear_spotify_oauth_pending_state()
+    clear_spotify_oauth_pending()
     return jsonify({"ok": True})
 
 
@@ -1960,71 +1851,43 @@ def get_spotify_web_playback_token():
     return jsonify({"accessToken": access_token})
 
 
-@app.post("/api/spotify/player/transfer")
-def spotify_player_transfer():
-    ensure_directories()
-    payload = request.get_json(silent=True) or {}
-    device_id = str(payload.get("deviceId", "")).strip()
-    should_play = bool(payload.get("play"))
-    if not device_id:
-        return jsonify({"error": "Missing Spotify playback device ID."}), 400
-
-    access_token = get_valid_spotify_access_token()
-    try:
-        spotify_api_request(
-            access_token,
-            "PUT",
-            "/me/player",
-            body={"device_ids": [device_id], "play": should_play},
-        )
-    except RuntimeError as error:
-        return jsonify({"error": str(error)}), 400
-
-    try:
-        return jsonify(fetch_spotify_player_state_payload())
-    except RuntimeError:
-        return jsonify({"ok": True, "connected": True, "deviceId": device_id})
-
-
 @app.post("/api/spotify/player/command")
 def spotify_player_command():
     ensure_directories()
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action", "")).strip().lower()
-    access_token = get_valid_spotify_access_token()
     device_id = str(payload.get("deviceId", "")).strip()
 
     try:
-        if action == "play":
-            params = {"device_id": device_id} if device_id else None
-            spotify_api_request(access_token, "PUT", "/me/player/play", params=params)
+        access_token = get_valid_spotify_access_token()
+        if action in {"play", "resume"}:
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": target_device_id})
         elif action == "pause":
-            params = {"device_id": device_id} if device_id else None
-            spotify_api_request(access_token, "PUT", "/me/player/pause", params=params)
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            spotify_api_request(access_token, "PUT", "/me/player/pause", params={"device_id": target_device_id})
         elif action == "next":
-            params = {"device_id": device_id} if device_id else None
-            spotify_api_request(access_token, "POST", "/me/player/next", params=params)
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            spotify_api_request(access_token, "POST", "/me/player/next", params={"device_id": target_device_id})
         elif action == "previous":
-            params = {"device_id": device_id} if device_id else None
-            spotify_api_request(access_token, "POST", "/me/player/previous", params=params)
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            spotify_api_request(access_token, "POST", "/me/player/previous", params={"device_id": target_device_id})
         elif action == "play-track":
             track_uri = str(payload.get("trackUri", "")).strip()
             context_uri = str(payload.get("contextUri", "")).strip()
             position_ms = int(payload.get("positionMs", 0) or 0)
-            shuffle_value = payload.get("shuffle") if "shuffle" in payload else None
+            shuffle_enabled = bool(payload.get("shuffle"))
             if not track_uri:
                 return jsonify({"error": "Missing Spotify track URI."}), 400
-            target_device_id = device_id or ensure_spotify_target_device(access_token)
-            if shuffle_value is not None:
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            if context_uri:
                 spotify_api_request(
                     access_token,
                     "PUT",
                     "/me/player/shuffle",
-                    params={
-                        "state": "true" if bool(shuffle_value) else "false",
-                        "device_id": target_device_id,
-                    },
+                    params={"state": "true" if shuffle_enabled else "false", "device_id": target_device_id},
                 )
+                time.sleep(0.15)
             body: dict[str, object]
             if context_uri:
                 body = {"context_uri": context_uri, "offset": {"uri": track_uri}}
@@ -2032,6 +1895,24 @@ def spotify_player_command():
                 body = {"uris": [track_uri]}
             if position_ms > 0:
                 body["position_ms"] = position_ms
+            spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": target_device_id}, body=body)
+        elif action == "play-context":
+            context_uri = str(payload.get("contextUri", "")).strip()
+            track_uri = str(payload.get("trackUri", "")).strip()
+            shuffle_enabled = bool(payload.get("shuffle"))
+            if not context_uri:
+                return jsonify({"error": "Missing Spotify context URI."}), 400
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            spotify_api_request(
+                access_token,
+                "PUT",
+                "/me/player/shuffle",
+                params={"state": "true" if shuffle_enabled else "false", "device_id": target_device_id},
+            )
+            time.sleep(0.15)
+            body: dict[str, object] = {"context_uri": context_uri}
+            if track_uri:
+                body["offset"] = {"uri": track_uri}
             spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": target_device_id}, body=body)
         else:
             return jsonify({"error": "Unsupported Spotify player command."}), 400
