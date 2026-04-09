@@ -2011,9 +2011,20 @@ def spotify_player_command():
             track_uri = str(payload.get("trackUri", "")).strip()
             context_uri = str(payload.get("contextUri", "")).strip()
             position_ms = int(payload.get("positionMs", 0) or 0)
+            shuffle_value = payload.get("shuffle") if "shuffle" in payload else None
             if not track_uri:
                 return jsonify({"error": "Missing Spotify track URI."}), 400
             target_device_id = device_id or ensure_spotify_target_device(access_token)
+            if shuffle_value is not None:
+                spotify_api_request(
+                    access_token,
+                    "PUT",
+                    "/me/player/shuffle",
+                    params={
+                        "state": "true" if bool(shuffle_value) else "false",
+                        "device_id": target_device_id,
+                    },
+                )
             body: dict[str, object]
             if context_uri:
                 body = {"context_uri": context_uri, "offset": {"uri": track_uri}}

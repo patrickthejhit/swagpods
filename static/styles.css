@@ -1936,6 +1936,17 @@ code {
   color: #fff;
 }
 
+.library-item.is-spotify-track {
+  min-height: 44px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.library-item.is-playing-track:not(.is-selected) {
+  background: linear-gradient(180deg, rgba(46, 174, 122, 0.16) 0%, rgba(26, 125, 86, 0.08) 100%);
+  color: #0f3b2b;
+}
+
 .library-song {
   display: block;
   min-width: 0;
@@ -1949,6 +1960,23 @@ code {
 
 .library-meta {
   display: none;
+}
+
+.library-item.is-spotify-track .library-meta {
+  display: block;
+  min-width: 0;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.library-item.is-selected .library-meta {
+  opacity: 0.92;
 }
 
 .customize-panel-screen {
