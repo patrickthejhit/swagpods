@@ -297,10 +297,18 @@ let syncViewState = {
 };
 let spotifyViewState = {
   configured: false,
+  authenticated: false,
   connected: false,
+  authState: "not_logged_in",
   profileName: "",
   profileImageUrl: "",
   playlists: [],
+  playlistCount: 0,
+  devices: [],
+  hasActiveDevice: false,
+  activeDeviceName: "",
+  sessionScopes: "",
+  needsReconnect: false,
   error: "",
   scopes: "",
 };
@@ -331,6 +339,26 @@ let spotifySdkInitPromise = null;
 let spotifyDeviceTransferPromise = null;
 let spotifyConnectInFlight = false;
 let spotifyAuthCallbackHandled = false;
+let spotifyRuntimeState = {
+  sdkStatus: "idle",
+  playerStatus: "idle",
+  libraryStatus: "idle",
+  searchStatus: "idle",
+  lastError: "",
+  lastAction: "",
+};
+let spotifySearchState = {
+  query: "",
+  lastSubmittedQuery: "",
+  busy: false,
+  error: "",
+  results: {
+    tracks: [],
+    playlists: [],
+    albums: [],
+    artists: [],
+  },
+};
 const SPOTIFY_PKCE_STORAGE_KEY = "swagpods.spotify.pkce";
 const SPOTIFY_LIBRARY_CACHE_KEY = "swagpods.spotify.library-cache.v1";
 const SPOTIFY_LIBRARY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
@@ -931,16 +959,13 @@ function getLibraryState() {
       : `${podcastSongs.length} podcast${podcastSongs.length === 1 ? "" : "s"}`;
   const photoSummary =
     photoCount === 0 ? "No photos yet." : `${photoCount} photo${photoCount === 1 ? "" : "s"}`;
+  const spotifyUiState = getSpotifyUiState();
   const spotifyConnectedMeta = spotifyViewState.connected
-    ? spotifyViewState.profileName || "Connected"
-    : spotifyViewState.configured
-      ? "Connect"
-      : "Setup";
-  const spotifySummary = !spotifyViewState.configured
-    ? "Spotify is not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI."
-    : spotifyViewState.connected
-      ? `Spotify Connected${spotifyViewState.profileName ? ` • ${spotifyViewState.profileName}` : ""}`
-      : "Connect Spotify to read your playlists.";
+    ? spotifyUiState.label
+    : spotifyUiState.label || (spotifyViewState.configured ? "Connect" : "Setup");
+  const spotifySummary = spotifyViewState.connected && spotifyViewState.profileName
+    ? `${spotifyUiState.summary}${spotifyUiState.summary ? " " : ""}${spotifyViewState.profileName ? `Signed in as ${spotifyViewState.profileName}.` : ""}`.trim()
+    : spotifyUiState.summary;
   const spotifyViewKey = getLibraryViewKey();
 
   if (spotifyViewKey.startsWith("spotify-playlist-detail:")) {
@@ -1079,33 +1104,35 @@ function getLibraryState() {
                 type: "action",
                 id: "spotify-now-playing",
                 title: "Now Playing",
-                meta: spotifyPlayerState.track?.title
-                  ? spotifyPlayerState.isPlaying
-                    ? "Playing"
-                    : "Paused"
-                  : spotifyPlayerState.hasActiveDevice
-                    ? "Ready"
-                    : "Open Spotify App",
+                meta: spotifyUiState.label,
               },
               {
                 type: "menu",
                 id: "spotify-library",
                 title: "Your Playlists",
-                meta: `${spotifyViewState.playlists.length} playlist${spotifyViewState.playlists.length === 1 ? "" : "s"}`,
+                meta: `${spotifyViewState.playlistCount} playlist${spotifyViewState.playlistCount === 1 ? "" : "s"}`,
+              },
+              {
+                type: "menu",
+                id: "spotify-search",
+                title: "Search",
+                meta: spotifyUiState.canSearch ? "Type to search" : spotifyUiState.label,
+                disabled: !spotifyUiState.canSearch,
               },
               {
                 type: "action",
-                id: "spotify-disconnect",
-                title: "Disconnect",
-                meta: "Sign out",
+                id: spotifyUiState.canConnect ? "spotify-connect" : "spotify-disconnect",
+                title: spotifyUiState.canConnect ? "Reconnect Spotify" : "Disconnect",
+                meta: spotifyUiState.canConnect ? "Refresh session" : "Sign out",
               },
             ]
           : [
               {
                 type: "action",
                 id: "spotify-connect",
-                title: "Connect Spotify",
-                meta: spotifyViewState.configured ? "OAuth PKCE" : "Setup Required",
+                title: spotifyUiState.canConnect ? "Connect Spotify" : "Spotify Unavailable",
+                meta: spotifyViewState.configured ? spotifyUiState.label : "Setup Required",
+                disabled: !spotifyUiState.canConnect,
               },
             ],
       };
@@ -1114,16 +1141,27 @@ function getLibraryState() {
         label: "Spotify",
         title: "Library",
         summary: !spotifyViewState.connected
-          ? "Connect Spotify first."
-          : "Browse Spotify like it lives inside the iPod.",
+          ? spotifyUiState.summary
+          : spotifyRuntimeState.libraryStatus === "loading"
+            ? "Loading your Spotify library..."
+            : "Browse Spotify like it lives inside the iPod.",
         items: !spotifyViewState.connected
           ? []
           : [
               {
                 type: "menu",
+                id: "spotify-search",
+                title: "Search",
+                meta: "Tracks, artists, albums",
+              },
+              {
+                type: "menu",
                 id: "spotify-playlists",
                 title: "Playlists",
-                meta: `${spotifyLibraryData.playlists.length} item${spotifyLibraryData.playlists.length === 1 ? "" : "s"}`,
+                meta:
+                  spotifyRuntimeState.libraryStatus === "loading"
+                    ? "Loading..."
+                    : `${spotifyLibraryData.playlists.length || spotifyViewState.playlistCount} item${(spotifyLibraryData.playlists.length || spotifyViewState.playlistCount) === 1 ? "" : "s"}`,
               },
               {
                 type: "menu",
@@ -1145,6 +1183,80 @@ function getLibraryState() {
               },
             ],
       };
+    case "spotify-search": {
+      const searchItems = [];
+      if (spotifySearchState.query) {
+        searchItems.push({
+          type: "action",
+          id: "spotify-search-submit",
+          title: `Search: ${spotifySearchState.query}`,
+          meta: spotifySearchState.busy ? "Searching..." : "Press center or Enter",
+        });
+        searchItems.push({
+          type: "action",
+          id: "spotify-search-clear",
+          title: "Clear Search",
+          meta: "Reset query",
+        });
+      } else {
+        searchItems.push({
+          type: "action",
+          id: "spotify-search-submit",
+          title: "Type To Search",
+          meta: "Keyboard input • Enter runs search",
+          disabled: true,
+        });
+      }
+      spotifySearchState.results.tracks.forEach((track) => {
+        searchItems.push({
+          type: "action",
+          id: `spotify-track:${track.id}`,
+          title: track.title || "Spotify Track",
+          meta: `Track • ${track.artist || "Spotify"}`,
+          spotifyTrack: track,
+          spotifyContextUri: "",
+        });
+      });
+      spotifySearchState.results.playlists.forEach((playlist) => {
+        searchItems.push({
+          type: "menu",
+          id: `spotify-playlist-detail:${playlist.id}`,
+          title: playlist.name || "Playlist",
+          meta: `Playlist • ${playlist.ownerName || `${playlist.trackCount || 0} tracks`}`,
+          spotifyPlaylist: playlist,
+        });
+      });
+      spotifySearchState.results.albums.forEach((album) => {
+        searchItems.push({
+          type: "menu",
+          id: `spotify-album-detail:${album.id}`,
+          title: album.name || "Album",
+          meta: `Album • ${album.artist || "Spotify"}`,
+          spotifyAlbum: album,
+        });
+      });
+      spotifySearchState.results.artists.forEach((artist) => {
+        searchItems.push({
+          type: "menu",
+          id: `spotify-artist-detail:${artist.id}`,
+          title: artist.name || "Artist",
+          meta: "Artist",
+          spotifyArtist: artist,
+        });
+      });
+      return {
+        label: "Spotify",
+        title: "Search",
+        summary: spotifySearchState.error
+          ? spotifySearchState.error
+          : spotifySearchState.busy
+            ? `Searching for "${spotifySearchState.query}"...`
+            : spotifySearchState.lastSubmittedQuery
+              ? `Results for "${spotifySearchState.lastSubmittedQuery}". Type more and press Enter to refine.`
+              : "Type on your keyboard, then press Enter to search Spotify.",
+        items: searchItems,
+      };
+    }
     case "spotify-playlists":
       return {
         label: "Spotify",
@@ -1634,10 +1746,18 @@ function normalizeSyncViewState(payload = {}) {
 function normalizeSpotifyViewState(payload = {}) {
   return {
     configured: Boolean(payload.configured),
+    authenticated: Boolean(payload.authenticated ?? payload.connected),
     connected: Boolean(payload.connected),
+    authState: payload.authState || (payload.connected ? "authenticated" : "not_logged_in"),
     profileName: payload.profileName || "",
     profileImageUrl: payload.profileImageUrl || "",
     playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
+    playlistCount: Number.isFinite(Number(payload.playlistCount)) ? Number(payload.playlistCount) : 0,
+    devices: Array.isArray(payload.devices) ? payload.devices : [],
+    hasActiveDevice: Boolean(payload.hasActiveDevice),
+    activeDeviceName: payload.activeDeviceName || "",
+    sessionScopes: payload.sessionScopes || "",
+    needsReconnect: Boolean(payload.needsReconnect),
     error: payload.error || "",
     scopes: payload.scopes || "",
   };
@@ -1700,6 +1820,143 @@ async function fetchJson(url, options = {}) {
 function logSpotifyAuth(step, detail = "") {
   const suffix = detail ? ` | ${detail}` : "";
   console.log(`[Spotify Auth] ${step}${suffix}`);
+}
+
+function resetSpotifySearchResults() {
+  spotifySearchState.results = {
+    tracks: [],
+    playlists: [],
+    albums: [],
+    artists: [],
+  };
+}
+
+function isSpotifySearchView() {
+  return screenMode === "library" && getLibraryViewKey() === "spotify-search";
+}
+
+function getSpotifyUiState() {
+  if (!spotifyViewState.configured) {
+    return {
+      code: "not_configured",
+      label: "Setup",
+      summary: "Spotify isn't configured yet. Add the Spotify app credentials first.",
+      canConnect: false,
+      canBrowse: false,
+      canSearch: false,
+      canControl: false,
+    };
+  }
+
+  if (!spotifyViewState.authenticated) {
+    return {
+      code: "not_logged_in",
+      label: "Connect",
+      summary: spotifyViewState.error || "Connect Spotify to unlock search, playlists, and playback.",
+      canConnect: true,
+      canBrowse: false,
+      canSearch: false,
+      canControl: false,
+    };
+  }
+
+  if (spotifyViewState.authState === "needs_reconnect") {
+    return {
+      code: "needs_reconnect",
+      label: "Reconnect",
+      summary: spotifyViewState.error || "Reconnect Spotify to refresh playback permissions.",
+      canConnect: true,
+      canBrowse: false,
+      canSearch: false,
+      canControl: false,
+    };
+  }
+
+  if (spotifyViewState.authState === "token_expired") {
+    return {
+      code: "token_expired",
+      label: "Reconnect",
+      summary: spotifyViewState.error || "Your Spotify session expired. Reconnect to keep playback working.",
+      canConnect: true,
+      canBrowse: false,
+      canSearch: false,
+      canControl: false,
+    };
+  }
+
+  if (!spotifyViewState.connected) {
+    return {
+      code: "auth_pending",
+      label: "Loading",
+      summary: spotifyViewState.error || "Spotify sign-in completed. Finishing setup now.",
+      canConnect: false,
+      canBrowse: false,
+      canSearch: false,
+      canControl: false,
+    };
+  }
+
+  if (spotifyRuntimeState.sdkStatus === "initializing") {
+    return {
+      code: "player_initializing",
+      label: "Starting",
+      summary: "Spotify is logged in. Starting the Web Player inside SwagPods.",
+      canConnect: false,
+      canBrowse: true,
+      canSearch: true,
+      canControl: false,
+    };
+  }
+
+  if (spotifyRuntimeState.sdkStatus === "error") {
+    return {
+      code: "player_error",
+      label: "Player Error",
+      summary: spotifyRuntimeState.lastError || "Spotify login worked, but the Web Player failed to start.",
+      canConnect: true,
+      canBrowse: true,
+      canSearch: true,
+      canControl: false,
+    };
+  }
+
+  if (!spotifySdkReady) {
+    return {
+      code: "player_not_initialized",
+      label: "Start Player",
+      summary: "Spotify is logged in. Open Spotify to initialize the player and transfer playback.",
+      canConnect: false,
+      canBrowse: true,
+      canSearch: true,
+      canControl: false,
+    };
+  }
+
+  if (!spotifyPlayerState.hasActiveDevice) {
+    return {
+      code: "no_active_device",
+      label: "No Device",
+      summary: spotifyViewState.activeDeviceName
+        ? `SwagPods is ready on ${spotifyViewState.activeDeviceName}. Press Play or choose a track to start.`
+        : "SwagPods player is ready. Press Play or choose a track to transfer playback here.",
+      canConnect: false,
+      canBrowse: true,
+      canSearch: true,
+      canControl: true,
+    };
+  }
+
+  return {
+    code: spotifyPlayerState.isPlaying ? "playing" : "ready",
+    label: spotifyPlayerState.isPlaying ? "Playing" : "Ready",
+    summary: spotifyPlayerState.track?.title
+      ? `${spotifyPlayerState.isPlaying ? "Playing" : "Paused"} ${spotifyPlayerState.track.title}${spotifyPlayerState.track.artist ? ` • ${spotifyPlayerState.track.artist}` : ""}`
+      : `Spotify is ready on ${spotifyPlayerState.deviceName || spotifyViewState.activeDeviceName || "SwagPods Web Player"}.`,
+    canConnect: false,
+    canBrowse: true,
+    canSearch: true,
+    canControl: true,
+  };
 }
 
 function isSpotifyRemoteSong(song = currentSong) {
@@ -1843,6 +2100,7 @@ function setScreenMode(nextMode) {
 function syncSelectButton() {
   const libraryState = getLibraryState();
   const hasLibrarySelection = libraryState.items.length > 0;
+  const selectedItem = libraryState.items[selectedIndex] || null;
   const shouldDisable =
     isExporting ||
     (screenMode === "sync" && (!syncViewState.canStart || syncViewState.busy)) ||
@@ -1851,7 +2109,7 @@ function syncSelectButton() {
     screenMode === "now-playing" ||
     screenMode === "customize" ||
     (screenMode === "edit" && !hasPendingUploads()) ||
-    (screenMode === "library" && !hasLibrarySelection);
+    (screenMode === "library" && (!hasLibrarySelection || Boolean(selectedItem?.disabled)));
 
   selectButton.disabled = shouldDisable;
 }
@@ -2879,6 +3137,9 @@ async function activateLibraryItem(itemData) {
   if (!itemData) {
     return;
   }
+  if (itemData.disabled) {
+    return;
+  }
 
   if (itemData.type === "action" && itemData.id === "convert") {
     clearPendingUploads();
@@ -2901,6 +3162,7 @@ async function activateLibraryItem(itemData) {
 
   if (itemData.type === "action" && itemData.id === "spotify-connect") {
     try {
+      spotifyRuntimeState.lastError = "";
       await connectSpotify();
     } catch (error) {
       setMessage(error.message, "error");
@@ -2932,11 +3194,37 @@ async function activateLibraryItem(itemData) {
 
   if (itemData.type === "action" && itemData.id === "spotify-now-playing") {
     try {
-      await openSpotifyNowPlaying();
+      screenMode = "now-playing";
+      setMessage("Opening Spotify inside SwagPods...", "success");
+      syncUi();
+      await bootstrapSpotifyPlayer({ autoplay: false, openNowPlaying: true });
+      if (!spotifyPlayerState.track) {
+        renderPlayer();
+      }
     } catch (error) {
       setMessage(error.message, "error");
       syncUi();
     }
+    return;
+  }
+
+  if (itemData.type === "action" && itemData.id === "spotify-search-submit") {
+    try {
+      await runSpotifySearch();
+    } catch (error) {
+      setMessage(error.message, "error");
+      syncUi();
+    }
+    return;
+  }
+
+  if (itemData.type === "action" && itemData.id === "spotify-search-clear") {
+    spotifySearchState.query = "";
+    spotifySearchState.lastSubmittedQuery = "";
+    spotifySearchState.error = "";
+    spotifySearchState.busy = false;
+    resetSpotifySearchResults();
+    syncUi();
     return;
   }
 
@@ -2980,9 +3268,31 @@ async function activateLibraryItem(itemData) {
 
   if (itemData.type === "menu") {
     if (itemData.id === "spotify") {
+      libraryPath = [...libraryPath, itemData.id];
+      selectedIndex = 0;
+      highlightedSongId = "";
+      setMessage("Checking Spotify status...", "success");
+      syncUi();
       try {
         await refreshSpotifyStatus();
-        if (spotifyViewState.connected && spotifyLibraryData.playlists.length === 0) {
+        if (spotifyViewState.connected) {
+          void bootstrapSpotifyPlayer({ autoplay: false });
+        }
+      } catch (error) {
+        setMessage(error.message, "error");
+        syncUi();
+        return;
+      }
+      syncUi();
+      return;
+    } else if (itemData.id === "spotify-library") {
+      libraryPath = [...libraryPath, itemData.id];
+      selectedIndex = 0;
+      highlightedSongId = "";
+      syncUi();
+      try {
+        if (spotifyLibraryData.playlists.length === 0 && spotifyRuntimeState.libraryStatus !== "loading") {
+          setMessage("Loading your Spotify library...", "success");
           await refreshSpotifyLibrary();
         }
       } catch (error) {
@@ -2990,19 +3300,15 @@ async function activateLibraryItem(itemData) {
         syncUi();
         return;
       }
-    }
-
-    if (itemData.id === "spotify-library") {
-      try {
-        await refreshSpotifyLibrary();
-      } catch (error) {
-        setMessage(error.message, "error");
-        syncUi();
-        return;
-      }
-    }
-
-    if (String(itemData.id || "").startsWith("spotify-playlist-detail:")) {
+      syncUi();
+      return;
+    } else if (itemData.id === "spotify-search") {
+      libraryPath = [...libraryPath, itemData.id];
+      selectedIndex = 0;
+      highlightedSongId = "";
+      syncUi();
+      return;
+    } else if (String(itemData.id || "").startsWith("spotify-playlist-detail:")) {
       const playlistId = itemData.id.split(":")[1] || "";
       try {
         await ensureSpotifyPlaylistDetail(playlistId);
@@ -3011,9 +3317,7 @@ async function activateLibraryItem(itemData) {
         syncUi();
         return;
       }
-    }
-
-    if (String(itemData.id || "").startsWith("spotify-album-detail:")) {
+    } else if (String(itemData.id || "").startsWith("spotify-album-detail:")) {
       const albumId = itemData.id.split(":")[1] || "";
       try {
         await ensureSpotifyAlbumDetail(albumId);
@@ -3022,9 +3326,7 @@ async function activateLibraryItem(itemData) {
         syncUi();
         return;
       }
-    }
-
-    if (String(itemData.id || "").startsWith("spotify-artist-detail:")) {
+    } else if (String(itemData.id || "").startsWith("spotify-artist-detail:")) {
       const artistId = itemData.id.split(":")[1] || "";
       try {
         await ensureSpotifyArtistDetail(artistId);
@@ -3075,7 +3377,7 @@ function renderLibrary() {
   }
 
   librarySummary.textContent = libraryState.summary;
-  librarySummary.classList.add("hidden");
+  librarySummary.classList.toggle("hidden", !shouldShowSummary);
 
   const halfWindow = Math.floor(VISIBLE_LIBRARY_ITEMS / 2);
   let startIndex = Math.max(0, selectedIndex - halfWindow);
@@ -3098,6 +3400,7 @@ function renderLibrary() {
     row.className = `library-item${isSelected ? " is-selected" : ""}${isMenuLike ? " is-menu-item" : ""}`;
     row.setAttribute("aria-selected", isSelected ? "true" : "false");
     row.type = "button";
+    row.disabled = Boolean(itemData.disabled);
     itemTitle.className = "library-song";
     itemMeta.className = "library-meta";
 
@@ -3131,6 +3434,9 @@ function renderLibrary() {
       syncUi();
     });
     row.addEventListener("click", async () => {
+      if (itemData.disabled) {
+        return;
+      }
       selectedIndex = itemIndex;
       highlightedSongId = itemData.type === "song" ? itemData.id : "";
       await activateLibraryItem(itemData);
@@ -3253,6 +3559,11 @@ async function refreshSpotifyStatus() {
   try {
     const payload = await fetchJson("/api/spotify/status");
     spotifyViewState = normalizeSpotifyViewState(payload);
+    if (spotifyViewState.error) {
+      spotifyRuntimeState.lastError = spotifyViewState.error;
+    } else if (spotifyRuntimeState.lastError && spotifyViewState.connected) {
+      spotifyRuntimeState.lastError = "";
+    }
   } catch (error) {
     spotifyViewState = normalizeSpotifyViewState({
       configured: false,
@@ -3275,13 +3586,17 @@ async function initializeSpotifySdk() {
   }
 
   spotifySdkInitPromise = new Promise((resolve, reject) => {
+    spotifyRuntimeState.sdkStatus = "initializing";
     const startPlayer = () => {
       if (!isSpotifySdkAvailable()) {
+        spotifyRuntimeState.sdkStatus = "error";
+        spotifyRuntimeState.lastError = "Spotify browser playback is not available in this browser.";
         reject(new Error("Spotify browser playback is not available in this browser."));
         return;
       }
 
       if (spotifySdkPlayer) {
+        spotifyRuntimeState.sdkStatus = "ready";
         resolve();
         return;
       }
@@ -3302,6 +3617,7 @@ async function initializeSpotifySdk() {
       player.addListener("ready", ({ device_id }) => {
         spotifySdkDeviceId = device_id;
         spotifySdkReady = true;
+        spotifyRuntimeState.sdkStatus = "ready";
         logSpotifyAuth("Player ready", `device_id=${device_id}`);
         void ensureSpotifyPlaybackDevice({ autoplay: false }).catch((error) => {
           logSpotifyAuth("Playback transfer failed", error.message || "unknown");
@@ -3310,21 +3626,29 @@ async function initializeSpotifySdk() {
       });
       player.addListener("not_ready", () => {
         spotifySdkReady = false;
+        spotifyRuntimeState.sdkStatus = "idle";
         logSpotifyAuth("Player not ready");
       });
       player.addListener("initialization_error", ({ message }) => {
+        spotifyRuntimeState.sdkStatus = "error";
+        spotifyRuntimeState.lastError = message || "Spotify player initialization failed.";
         logSpotifyAuth("SDK initialization_error", message || "");
         reject(new Error(message));
       });
       player.addListener("authentication_error", ({ message }) => {
+        spotifyRuntimeState.sdkStatus = "error";
+        spotifyRuntimeState.lastError = message || "Spotify player authentication failed.";
         logSpotifyAuth("SDK authentication_error", message || "");
         reject(new Error(message));
       });
       player.addListener("account_error", ({ message }) => {
+        spotifyRuntimeState.sdkStatus = "error";
+        spotifyRuntimeState.lastError = message || "Spotify playback requires an eligible account.";
         logSpotifyAuth("SDK account_error", message || "");
         reject(new Error(message));
       });
       player.addListener("playback_error", ({ message }) => {
+        spotifyRuntimeState.lastError = message || "Spotify playback failed.";
         logSpotifyAuth("SDK playback_error", message || "");
         reject(new Error(message));
       });
@@ -3363,6 +3687,8 @@ async function initializeSpotifySdk() {
 
       player.connect().then((connected) => {
         if (!connected) {
+          spotifyRuntimeState.sdkStatus = "error";
+          spotifyRuntimeState.lastError = "Spotify browser playback could not connect.";
           reject(new Error("Spotify browser playback could not connect."));
           return;
         }
@@ -3388,6 +3714,39 @@ async function initializeSpotifySdk() {
   });
 
   return spotifySdkInitPromise;
+}
+
+async function bootstrapSpotifyPlayer(options = {}) {
+  const { autoplay = false, openNowPlaying = false } = options;
+  await refreshSpotifyStatus();
+  if (!spotifyViewState.connected) {
+    syncUi();
+    return false;
+  }
+
+  spotifyRuntimeState.playerStatus = "initializing";
+  spotifyRuntimeState.lastAction = openNowPlaying ? "open-now-playing" : "bootstrap";
+  setMessage("Starting Spotify player...", "success");
+  syncUi();
+
+  try {
+    await initializeSpotifySdk();
+    await ensureSpotifyPlaybackDevice({ autoplay });
+    await refreshSpotifyPlayerState();
+    spotifyRuntimeState.playerStatus = spotifyPlayerState.hasActiveDevice ? "ready" : "no_active_device";
+    if (openNowPlaying) {
+      screenMode = "now-playing";
+    }
+    setMessage(getSpotifyUiState().summary, "success");
+    syncUi();
+    return true;
+  } catch (error) {
+    spotifyRuntimeState.playerStatus = "error";
+    spotifyRuntimeState.lastError = error.message || "Spotify player failed to initialize.";
+    setMessage(spotifyRuntimeState.lastError, "error");
+    syncUi();
+    return false;
+  }
 }
 
 async function ensureSpotifyPlaybackDevice(options = {}) {
@@ -3421,38 +3780,84 @@ async function ensureSpotifyPlaybackDevice(options = {}) {
 
 async function refreshSpotifyLibrary(options = {}) {
   const { force = false } = options;
-  if (!force && spotifyViewState.connected) {
-    const cached = loadSpotifyLibraryCache();
-    if (cached?.payload && (!cached.profileName || cached.profileName === spotifyViewState.profileName)) {
-      spotifyLibraryData = {
-        playlists: Array.isArray(cached.payload.playlists) ? cached.payload.playlists : [],
-        albums: Array.isArray(cached.payload.albums) ? cached.payload.albums : [],
-        artists: Array.isArray(cached.payload.artists) ? cached.payload.artists : [],
-        tracks: Array.isArray(cached.payload.tracks) ? cached.payload.tracks : [],
-        playlistDetails: {},
-        albumDetails: {},
-        artistDetails: {},
-      };
-      return;
+  spotifyRuntimeState.libraryStatus = "loading";
+  try {
+    if (!force && spotifyViewState.connected) {
+      const cached = loadSpotifyLibraryCache();
+      if (cached?.payload && (!cached.profileName || cached.profileName === spotifyViewState.profileName)) {
+        spotifyLibraryData = {
+          playlists: Array.isArray(cached.payload.playlists) ? cached.payload.playlists : [],
+          albums: Array.isArray(cached.payload.albums) ? cached.payload.albums : [],
+          artists: Array.isArray(cached.payload.artists) ? cached.payload.artists : [],
+          tracks: Array.isArray(cached.payload.tracks) ? cached.payload.tracks : [],
+          playlistDetails: {},
+          albumDetails: {},
+          artistDetails: {},
+        };
+        spotifyRuntimeState.libraryStatus = "ready";
+        return;
+      }
     }
+
+    const payload = await fetchJson("/api/spotify/library");
+    spotifyLibraryData = {
+      playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
+      albums: Array.isArray(payload.albums) ? payload.albums : [],
+      artists: Array.isArray(payload.artists) ? payload.artists : [],
+      tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
+      playlistDetails: {},
+      albumDetails: {},
+      artistDetails: {},
+    };
+    saveSpotifyLibraryCache(spotifyViewState.profileName, {
+      playlists: spotifyLibraryData.playlists,
+      albums: spotifyLibraryData.albums,
+      artists: spotifyLibraryData.artists,
+      tracks: spotifyLibraryData.tracks,
+    });
+    spotifyRuntimeState.libraryStatus = "ready";
+  } catch (error) {
+    spotifyRuntimeState.libraryStatus = "error";
+    spotifyRuntimeState.lastError = error.message || "Spotify library failed to load.";
+    throw error;
+  }
+}
+
+async function runSpotifySearch(query = spotifySearchState.query) {
+  const trimmedQuery = String(query || "").trim();
+  spotifySearchState.query = trimmedQuery;
+  spotifySearchState.error = "";
+  if (!trimmedQuery) {
+    resetSpotifySearchResults();
+    syncUi();
+    return;
   }
 
-  const payload = await fetchJson("/api/spotify/library");
-  spotifyLibraryData = {
-    playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
-    albums: Array.isArray(payload.albums) ? payload.albums : [],
-    artists: Array.isArray(payload.artists) ? payload.artists : [],
-    tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
-    playlistDetails: {},
-    albumDetails: {},
-    artistDetails: {},
-  };
-  saveSpotifyLibraryCache(spotifyViewState.profileName, {
-    playlists: spotifyLibraryData.playlists,
-    albums: spotifyLibraryData.albums,
-    artists: spotifyLibraryData.artists,
-    tracks: spotifyLibraryData.tracks,
-  });
+  spotifySearchState.busy = true;
+  spotifyRuntimeState.searchStatus = "loading";
+  setMessage(`Searching Spotify for "${trimmedQuery}"...`, "success");
+  syncUi();
+
+  try {
+    const payload = await fetchJson(`/api/spotify/search?q=${encodeURIComponent(trimmedQuery)}`);
+    spotifySearchState.lastSubmittedQuery = trimmedQuery;
+    spotifySearchState.results = {
+      tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
+      playlists: Array.isArray(payload.playlists) ? payload.playlists : [],
+      albums: Array.isArray(payload.albums) ? payload.albums : [],
+      artists: Array.isArray(payload.artists) ? payload.artists : [],
+    };
+    spotifyRuntimeState.searchStatus = "ready";
+    setMessage(`Spotify search ready for "${trimmedQuery}".`, "success");
+  } catch (error) {
+    resetSpotifySearchResults();
+    spotifySearchState.error = error.message;
+    spotifyRuntimeState.searchStatus = "error";
+    setMessage(error.message, "error");
+  } finally {
+    spotifySearchState.busy = false;
+    syncUi();
+  }
 }
 
 async function ensureSpotifyPlaylistDetail(playlistId) {
@@ -3498,7 +3903,8 @@ async function ensureSpotifyArtistDetail(artistId) {
 }
 
 async function connectSpotify() {
-  if (spotifyViewState.connected) {
+  const spotifyUiState = getSpotifyUiState();
+  if (spotifyViewState.connected && !spotifyUiState.canConnect) {
     setMessage(
       spotifyViewState.profileName
         ? `Spotify Connected: ${spotifyViewState.profileName}`
@@ -3519,6 +3925,7 @@ async function connectSpotify() {
   }
 
   spotifyConnectInFlight = true;
+  spotifyRuntimeState.lastAction = "connect";
   setMessage("Starting Spotify sign-in...", "success");
   logSpotifyAuth("Starting Spotify auth");
   try {
@@ -3548,9 +3955,22 @@ async function disconnectSpotify() {
   });
   clearSpotifyPkceState();
   clearSpotifyLibraryCache();
+  resetSpotifySearchResults();
+  spotifySearchState.query = "";
+  spotifySearchState.lastSubmittedQuery = "";
+  spotifySearchState.error = "";
+  spotifySearchState.busy = false;
   spotifyDeviceTransferPromise = null;
   spotifySdkDeviceId = "";
   spotifySdkReady = false;
+  spotifyRuntimeState = {
+    sdkStatus: "idle",
+    playerStatus: "idle",
+    libraryStatus: "idle",
+    searchStatus: "idle",
+    lastError: "",
+    lastAction: "disconnect",
+  };
   stopSpotifyPlayerPolling();
   spotifyPlayerState = normalizeSpotifyPlayerState();
   if (isSpotifyRemoteSong()) {
@@ -3571,6 +3991,7 @@ async function disconnectSpotify() {
 async function refreshSpotifyPlayerState() {
   const payload = await fetchJson("/api/spotify/player");
   spotifyPlayerState = normalizeSpotifyPlayerState(payload);
+  spotifyRuntimeState.playerStatus = spotifyPlayerState.hasActiveDevice ? "ready" : "no_active_device";
 
   if (spotifyPlayerState.track) {
     const track = spotifyPlayerState.track;
@@ -3626,6 +4047,9 @@ function startSpotifyPlayerPolling() {
 }
 
 async function openSpotifyNowPlaying() {
+  if (spotifyViewState.connected) {
+    await bootstrapSpotifyPlayer({ autoplay: false });
+  }
   await refreshSpotifyPlayerState();
   screenMode = "now-playing";
   syncUi();
@@ -3976,18 +4400,7 @@ async function loadSpotifyState() {
 
     await refreshSpotifyStatus();
     if (spotifyViewState.connected) {
-      try {
-        await initializeSpotifySdk();
-      } catch (error) {
-        setMessage(error.message, "error");
-      }
-    }
-    if (spotifyViewState.connected) {
-      try {
-        await refreshSpotifyPlayerState();
-      } catch (error) {
-        spotifyPlayerState = normalizeSpotifyPlayerState();
-      }
+      await bootstrapSpotifyPlayer({ autoplay: false });
     } else {
       spotifyPlayerState = normalizeSpotifyPlayerState();
     }
@@ -4005,7 +4418,15 @@ async function loadSpotifyState() {
       libraryPath = ["main", "music", "spotify"];
       selectedIndex = 0;
       screenMode = "library";
-      await refreshSpotifyLibrary();
+      syncUi();
+      if (spotifyRuntimeState.libraryStatus === "idle") {
+        void refreshSpotifyLibrary().then(() => {
+          syncUi();
+        }).catch((error) => {
+          setMessage(error.message, "error");
+          syncUi();
+        });
+      }
     } else if (window.APP_CONFIG?.spotifyAuthState === "connected" && !spotifyViewState.connected) {
       setMessage(
         "Spotify sign-in completed but the session was not available. Check redirect URI/cookies, then connect again.",
@@ -4768,6 +5189,43 @@ playerArtwork.addEventListener("error", () => {
 convertResultArtwork.addEventListener("error", () => {
   convertResultArtwork.classList.add("hidden");
   convertResultPlaceholder.classList.remove("hidden");
+});
+
+document.addEventListener("keydown", (event) => {
+  if (!isSpotifySearchView()) {
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) {
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    if (!spotifySearchState.busy) {
+      void runSpotifySearch();
+    }
+    return;
+  }
+  if (event.key === "Backspace") {
+    event.preventDefault();
+    spotifySearchState.query = spotifySearchState.query.slice(0, -1);
+    spotifySearchState.error = "";
+    syncUi();
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    spotifySearchState.query = "";
+    spotifySearchState.error = "";
+    resetSpotifySearchResults();
+    syncUi();
+    return;
+  }
+  if (event.key.length === 1 && event.key >= " ") {
+    event.preventDefault();
+    spotifySearchState.query = `${spotifySearchState.query}${event.key}`.slice(0, 48);
+    spotifySearchState.error = "";
+    syncUi();
+  }
 });
 
 syncUi();

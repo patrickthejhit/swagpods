@@ -2,6 +2,7 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.spotify_sessions/
 *.log
 uploads/originals/*
 !uploads/originals/.gitkeep

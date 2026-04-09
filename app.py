@@ -377,9 +377,11 @@ def get_valid_spotify_access_token() -> str:
     return str(refreshed["access_token"])
 
 
-def fetch_spotify_profile_and_playlists() -> tuple[dict[str, object], list[dict[str, object]]]:
-    access_token = get_valid_spotify_access_token()
-    profile = spotify_api_get(access_token, "/me")
+def fetch_spotify_profile(access_token: str) -> dict[str, object]:
+    return spotify_api_get(access_token, "/me")
+
+
+def fetch_spotify_playlist_summaries(access_token: str) -> list[dict[str, object]]:
     playlists: list[dict[str, object]] = []
     next_url = f"{SPOTIFY_API_BASE}/me/playlists?limit=50"
     while next_url:
@@ -398,7 +400,19 @@ def fetch_spotify_profile_and_playlists() -> tuple[dict[str, object], list[dict[
                 }
             )
         next_url = str(payload.get("next") or "")
+    return playlists
+
+
+def fetch_spotify_profile_and_playlists(access_token: str | None = None) -> tuple[dict[str, object], list[dict[str, object]]]:
+    resolved_access_token = access_token or get_valid_spotify_access_token()
+    profile = fetch_spotify_profile(resolved_access_token)
+    playlists = fetch_spotify_playlist_summaries(resolved_access_token)
     return profile, playlists
+
+
+def fetch_spotify_playlist_count(access_token: str) -> int:
+    payload = spotify_api_get(access_token, "/me/playlists", params={"limit": 1})
+    return int(payload.get("total", 0) or 0)
 
 
 def paginate_spotify_items(access_token: str, initial_url: str) -> list[dict[str, object]]:
@@ -472,7 +486,7 @@ def build_spotify_playlist_payload(item: dict[str, object]) -> dict[str, object]
 
 def fetch_spotify_library_sections() -> dict[str, object]:
     access_token = get_valid_spotify_access_token()
-    profile, playlists = fetch_spotify_profile_and_playlists()
+    profile, playlists = fetch_spotify_profile_and_playlists(access_token)
 
     album_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/albums?limit=50")
     saved_track_items = paginate_spotify_items(access_token, f"{SPOTIFY_API_BASE}/me/tracks?limit=50")
@@ -507,6 +521,48 @@ def fetch_spotify_library_sections() -> dict[str, object]:
         "albums": albums,
         "artists": sorted(artist_index.values(), key=lambda item: str(item["name"]).lower()),
         "tracks": tracks,
+    }
+
+
+def fetch_spotify_search_results(query: str) -> dict[str, object]:
+    access_token = get_valid_spotify_access_token()
+    payload = spotify_api_get(
+        access_token,
+        "/search",
+        params={
+            "q": query,
+            "type": "track,playlist,album,artist",
+            "limit": 10,
+        },
+    )
+
+    tracks = [
+        build_spotify_track_payload(item)
+        for item in ((payload.get("tracks") or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+    playlists = [
+        build_spotify_playlist_payload(item)
+        for item in ((payload.get("playlists") or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+    albums = [
+        build_spotify_album_payload(item)
+        for item in ((payload.get("albums") or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+    artists = [
+        build_spotify_artist_payload(item)
+        for item in ((payload.get("artists") or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+
+    return {
+        "query": query,
+        "tracks": tracks,
+        "playlists": playlists,
+        "albums": albums,
+        "artists": artists,
     }
 
 
@@ -633,9 +689,9 @@ def fetch_spotify_player_state_payload() -> dict[str, object]:
     }
 
 
-def fetch_spotify_devices_payload() -> list[dict[str, object]]:
-    access_token = get_valid_spotify_access_token()
-    payload = spotify_api_get(access_token, "/me/player/devices")
+def fetch_spotify_devices_payload(access_token: str | None = None) -> list[dict[str, object]]:
+    resolved_access_token = access_token or get_valid_spotify_access_token()
+    payload = spotify_api_get(resolved_access_token, "/me/player/devices")
     devices: list[dict[str, object]] = []
     for item in payload.get("devices", []):
         if not isinstance(item, dict):
@@ -691,15 +747,24 @@ def get_spotify_status_payload() -> dict[str, object]:
     config = get_spotify_oauth_config()
     status: dict[str, object] = {
         "configured": bool(config["clientId"]),
+        "authenticated": False,
         "connected": False,
+        "authState": "not_logged_in",
         "profileName": "",
         "profileImageUrl": "",
         "playlists": [],
+        "playlistCount": 0,
+        "devices": [],
+        "hasActiveDevice": False,
+        "activeDeviceName": "",
+        "sessionScopes": "",
+        "needsReconnect": False,
         "error": "",
         "scopes": config["scopes"],
     }
 
     if not status["configured"]:
+        status["authState"] = "not_configured"
         status["error"] = "Spotify is not configured yet. Add SPOTIFY_CLIENT_ID and SPOTIFY_REDIRECT_URI."
         return status
 
@@ -707,11 +772,15 @@ def get_spotify_status_payload() -> dict[str, object]:
     if not session_data:
         return status
 
+    status["authenticated"] = True
+    status["authState"] = "authenticated"
     session_scopes_raw = str(session_data.get("scope") or session_data.get("scopes") or "").strip()
+    status["sessionScopes"] = session_scopes_raw
     session_scopes = {item.strip() for item in session_scopes_raw.split() if item.strip()}
     missing_required = [scope for scope in SPOTIFY_REQUIRED_SCOPES if scope not in session_scopes]
     if missing_required:
-        clear_spotify_session_data()
+        status["authState"] = "needs_reconnect"
+        status["needsReconnect"] = True
         status["error"] = (
             "Spotify session is missing required playback scopes "
             f"({', '.join(missing_required)}). Please reconnect Spotify."
@@ -719,9 +788,18 @@ def get_spotify_status_payload() -> dict[str, object]:
         return status
 
     try:
-        profile, playlists = fetch_spotify_profile_and_playlists()
+        access_token = get_valid_spotify_access_token()
     except RuntimeError as error:
-        clear_spotify_session_data()
+        status["authState"] = "token_expired"
+        status["error"] = str(error)
+        return status
+
+    try:
+        profile = fetch_spotify_profile(access_token)
+        playlist_count = fetch_spotify_playlist_count(access_token)
+        devices = fetch_spotify_devices_payload(access_token)
+    except RuntimeError as error:
+        status["authState"] = "player_unavailable"
         status["error"] = str(error)
         return status
 
@@ -737,7 +815,12 @@ def get_spotify_status_payload() -> dict[str, object]:
     status["connected"] = True
     status["profileName"] = str(profile.get("display_name") or profile.get("id") or "Spotify User").strip()
     status["profileImageUrl"] = image_url
-    status["playlists"] = playlists
+    status["playlists"] = []
+    status["playlistCount"] = playlist_count
+    status["devices"] = devices
+    status["hasActiveDevice"] = any(bool(item.get("isActive")) for item in devices)
+    active_device = next((item for item in devices if bool(item.get("isActive"))), None)
+    status["activeDeviceName"] = str((active_device or {}).get("name") or "").strip()
     status["webPlaybackSupported"] = True
     return status
 
@@ -1661,6 +1744,18 @@ def get_spotify_library():
     ensure_directories()
     try:
         return jsonify(fetch_spotify_library_sections())
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.get("/api/spotify/search")
+def search_spotify_library():
+    ensure_directories()
+    query = str(request.args.get("q", "")).strip()
+    if not query:
+        return jsonify({"error": "Enter a Spotify search query."}), 400
+    try:
+        return jsonify(fetch_spotify_search_results(query))
     except RuntimeError as error:
         return jsonify({"error": str(error)}), 400
 
