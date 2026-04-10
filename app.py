@@ -250,6 +250,7 @@ def load_spotify_session_data() -> dict[str, object]:
 def save_spotify_session_data(payload: dict[str, object]) -> None:
     session["spotify_session_data"] = payload
     path = get_spotify_session_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -261,6 +262,67 @@ def clear_spotify_session_data() -> None:
             path.unlink()
         except OSError:
             pass
+
+
+def normalize_spotify_session_payload(
+    payload: dict[str, object], previous: dict[str, object] | None = None
+) -> dict[str, object]:
+    previous_payload = dict(previous or {})
+    normalized_payload = dict(previous_payload)
+    now_timestamp = int(datetime.now().timestamp())
+
+    def get_string(*keys: str) -> str:
+        for key in keys:
+            value = payload.get(key, previous_payload.get(key))
+            if value is None:
+                continue
+            normalized_value = str(value).strip()
+            if normalized_value:
+                return normalized_value
+        return ""
+
+    def get_int(*keys: str) -> int:
+        for key in keys:
+            value = payload.get(key, previous_payload.get(key))
+            if value is None or value == "":
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    access_token = get_string("access_token", "accessToken")
+    refresh_token = get_string("refresh_token", "refreshToken")
+    token_type = get_string("token_type", "tokenType")
+    scope = get_string("scope", "scopes")
+    profile_name = get_string("profile_name", "profileName")
+    profile_image_url = get_string("profile_image_url", "profileImageUrl")
+    expires_at = get_int("expires_at", "expiresAt")
+
+    if expires_at > 10_000_000_000:
+        expires_at //= 1000
+    if expires_at <= 0:
+        expires_in = get_int("expires_in", "expiresIn")
+        if expires_in > 0:
+            expires_at = now_timestamp + expires_in
+
+    if access_token:
+        normalized_payload["access_token"] = access_token
+    if refresh_token:
+        normalized_payload["refresh_token"] = refresh_token
+    if token_type:
+        normalized_payload["token_type"] = token_type
+    if expires_at > 0:
+        normalized_payload["expires_at"] = expires_at
+    if scope:
+        normalized_payload["scope"] = scope
+        normalized_payload["scopes"] = scope
+    if profile_name:
+        normalized_payload["profile_name"] = profile_name
+    if profile_image_url:
+        normalized_payload["profile_image_url"] = profile_image_url
+    return normalized_payload
 
 
 def load_spotify_oauth_pending() -> dict[str, str]:
@@ -1880,8 +1942,38 @@ def spotify_exchange_code():
     except RuntimeError as error:
         return jsonify({"error": str(error)}), 400
 
+    session_data = normalize_spotify_session_payload(token_data, load_spotify_session_data())
+    save_spotify_session_data(session_data)
     clear_spotify_oauth_pending()
     return jsonify(token_data)
+
+
+@app.post("/api/spotify/session/restore")
+def restore_spotify_session():
+    ensure_directories()
+    payload = request.get_json(silent=True) or {}
+    session_data = normalize_spotify_session_payload(payload, load_spotify_session_data())
+    has_access_token = bool(str(session_data.get("access_token", "")).strip())
+    has_refresh_token = bool(str(session_data.get("refresh_token", "")).strip())
+    if not has_access_token and not has_refresh_token:
+        return jsonify({"error": "Missing Spotify token data."}), 400
+
+    save_spotify_session_data(session_data)
+    log_spotify_playback(
+        "session restored",
+        hasAccessToken=has_access_token,
+        hasRefreshToken=has_refresh_token,
+        expiresAt=int(session_data.get("expires_at", 0) or 0),
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "hasAccessToken": has_access_token,
+            "hasRefreshToken": has_refresh_token,
+            "expiresAt": int(session_data.get("expires_at", 0) or 0),
+            "profileName": str(session_data.get("profile_name", "")).strip(),
+        }
+    )
 
 
 @app.get("/spotify/callback")

@@ -352,6 +352,8 @@ let spotifySdkPlayer = null;
 let spotifySdkDeviceId = "";
 let spotifySdkReady = false;
 let spotifySdkInitPromise = null;
+let spotifyServerSessionSyncPromise = null;
+let spotifyServerSessionFingerprint = "";
 let spotifySearchDebounceTimer = null;
 const SPOTIFY_SDK_DEVICE_WAIT_MS = 250;
 const SPOTIFY_SDK_DEVICE_WAIT_ATTEMPTS = 12;
@@ -2183,6 +2185,97 @@ function clearSpotifyAuthState() {
     return;
   }
   window.localStorage.removeItem(SPOTIFY_AUTH_STORAGE_KEY);
+  spotifyServerSessionFingerprint = "";
+}
+
+function buildSpotifyServerSessionPayload(authState = loadSpotifyAuthState()) {
+  if (!authState) {
+    return null;
+  }
+  return {
+    accessToken: authState.accessToken || "",
+    refreshToken: authState.refreshToken || "",
+    tokenType: authState.tokenType || "Bearer",
+    expiresAt: Number(authState.expiresAt || 0),
+    scopes: authState.scopes || getSpotifyOAuthConfig().scopes,
+    profileName: authState.profileName || "",
+    profileImageUrl: authState.profileImageUrl || "",
+  };
+}
+
+function isMissingSpotifyServerSessionError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("spotify session is missing or expired");
+}
+
+async function restoreSpotifyServerSession(options = {}) {
+  const authState = options.authState || loadSpotifyAuthState();
+  const payload = buildSpotifyServerSessionPayload(authState);
+  if (!payload || (!payload.accessToken && !payload.refreshToken)) {
+    return false;
+  }
+
+  const fingerprint = JSON.stringify([
+    payload.accessToken,
+    payload.refreshToken,
+    payload.expiresAt,
+    payload.scopes,
+    payload.profileName,
+  ]);
+  if (!options.force && spotifyServerSessionFingerprint === fingerprint) {
+    return true;
+  }
+  if (!options.force && spotifyServerSessionSyncPromise) {
+    return spotifyServerSessionSyncPromise;
+  }
+
+  spotifyServerSessionSyncPromise = (async () => {
+    try {
+      const response = await fetchJson("/api/spotify/session/restore", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      spotifyServerSessionFingerprint = fingerprint;
+      logSpotifyConsole("info", "Spotify server session restored", {
+        expiresAt: response?.expiresAt || 0,
+        hasRefreshToken: Boolean(response?.hasRefreshToken),
+      });
+      return true;
+    } catch (error) {
+      logSpotifyConsole("warn", "Spotify server session restore failed", {
+        error: error.message || String(error),
+      });
+      if (!options.silent) {
+        throw error;
+      }
+      return false;
+    } finally {
+      spotifyServerSessionSyncPromise = null;
+    }
+  })();
+
+  return spotifyServerSessionSyncPromise;
+}
+
+async function withSpotifyServerSessionRecovery(runRequest, label = "Spotify playback") {
+  try {
+    return await runRequest();
+  } catch (error) {
+    if (!isMissingSpotifyServerSessionError(error)) {
+      throw error;
+    }
+    logSpotifyConsole("warn", `${label} lost the Spotify server session, attempting restore`, {
+      error: error.message || String(error),
+    });
+    const restored = await restoreSpotifyServerSession({ force: true, silent: true });
+    if (!restored) {
+      throw error;
+    }
+    return runRequest();
+  }
 }
 
 function getSpotifyOAuthConfig() {
@@ -2326,6 +2419,11 @@ async function refreshSpotifyAccessToken() {
     client_id: config.clientId,
   });
   const updatedAuth = storeSpotifyTokenPayload(payload, authState);
+  await restoreSpotifyServerSession({
+    authState: updatedAuth,
+    force: true,
+    silent: true,
+  });
   return updatedAuth.accessToken;
 }
 
@@ -4700,6 +4798,15 @@ async function connectSpotify() {
 }
 
 async function disconnectSpotify() {
+  try {
+    await fetchJson("/api/spotify/disconnect", {
+      method: "POST",
+    });
+  } catch (error) {
+    logSpotifyConsole("warn", "Spotify disconnect request failed", {
+      error: error.message || String(error),
+    });
+  }
   clearSpotifyPkceState();
   clearSpotifyAuthState();
   stopSpotifyPlayerPolling();
@@ -4749,7 +4856,10 @@ async function disconnectSpotify() {
 }
 
 async function refreshSpotifyPlayerState() {
-  const payload = await fetchJson("/api/spotify/player");
+  const payload = await withSpotifyServerSessionRecovery(
+    () => fetchJson("/api/spotify/player"),
+    "Spotify player state"
+  );
   return applySpotifyPlayerResponse(
     payload,
     spotifyPlaybackContext.selectedTrack,
@@ -4926,13 +5036,17 @@ async function requestSpotifyPlayerCommand(action, options = {}) {
     diagnostics: getSpotifyPlaybackDiagnostics(),
   });
   try {
-    const response = await fetchJson("/api/spotify/player/command", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    const response = await withSpotifyServerSessionRecovery(
+      () =>
+        fetchJson("/api/spotify/player/command", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        }),
+      `Spotify player command: ${action}`
+    );
     logSpotifyConsole("info", "Spotify player command completed", {
       action,
       requestedDeviceId,
@@ -5362,6 +5476,7 @@ async function loadSpotifyState() {
           }),
         });
         storeSpotifyTokenPayload(payload);
+        await restoreSpotifyServerSession({ force: true, silent: true });
         clearSpotifyPkceState();
         window.APP_CONFIG.spotifyAuthState = "connected";
       }
@@ -5369,6 +5484,7 @@ async function loadSpotifyState() {
 
     await refreshSpotifyStatus();
     if (spotifyViewState.connected) {
+      await restoreSpotifyServerSession({ silent: true });
       try {
         await initializeSpotifySdk();
       } catch (error) {
