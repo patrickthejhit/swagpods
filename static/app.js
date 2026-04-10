@@ -117,17 +117,17 @@ const WHEEL_RING_INNER_RATIO = 0.36;
 const WHEEL_RING_OUTER_RATIO = 0.92;
 const WHEEL_RING_HYSTERESIS = 0.08;
 const WHEEL_DETENT_ANGLE = 0.15;
-const WHEEL_MAX_DELTA = 0.55;
-const WHEEL_DELTA_SMOOTHING = 0.32;
-const WHEEL_MIN_DELTA = 0.012;
+const WHEEL_MAX_DELTA = 0.38;
+const WHEEL_DELTA_SMOOTHING = 0.5;
+const WHEEL_MIN_DELTA = 0.009;
 const WHEEL_RADIAL_DRIFT_LIMIT = 0.12;
-const WHEEL_ACCELERATION_START = 0.008;
-const WHEEL_ACCELERATION_FACTOR = 18;
-const WHEEL_ACCELERATION_CAP = 0.85;
-const WHEEL_FAST_SPIN_SPEED = 0.022;
-const WHEEL_MEDIUM_SPIN_SPEED = 0.012;
-const WHEEL_DIRECTION_LOCK_ANGLE = 0.055;
-const WHEEL_SCROLL_STEP_DELTA = 24;
+const WHEEL_ACCELERATION_START = 0.012;
+const WHEEL_ACCELERATION_FACTOR = 9;
+const WHEEL_ACCELERATION_CAP = 0.38;
+const WHEEL_FAST_SPIN_SPEED = 0.03;
+const WHEEL_MEDIUM_SPIN_SPEED = 0.017;
+const WHEEL_DIRECTION_LOCK_ANGLE = 0.07;
+const WHEEL_SCROLL_STEP_DELTA = 40;
 const WHEEL_POINTER_PROFILES = {
   coarse: {
     detentAngle: WHEEL_DETENT_ANGLE,
@@ -141,23 +141,23 @@ const WHEEL_POINTER_PROFILES = {
     fastSpinSpeed: WHEEL_FAST_SPIN_SPEED,
     mediumSpinSpeed: WHEEL_MEDIUM_SPIN_SPEED,
     directionLockAngle: WHEEL_DIRECTION_LOCK_ANGLE,
-    maxStepsFast: 4,
-    maxStepsMedium: 2,
+    maxStepsFast: 2,
+    maxStepsMedium: 1,
   },
   fine: {
-    detentAngle: 0.13,
-    maxDelta: 0.42,
-    smoothing: 0.2,
-    minDelta: 0.006,
+    detentAngle: 0.17,
+    maxDelta: 0.32,
+    smoothing: 0.42,
+    minDelta: 0.005,
     radialDriftLimit: 0.09,
-    accelStart: 0.005,
-    accelFactor: 22,
-    accelCap: 1.05,
-    fastSpinSpeed: 0.016,
-    mediumSpinSpeed: 0.009,
-    directionLockAngle: 0.042,
-    maxStepsFast: 5,
-    maxStepsMedium: 3,
+    accelStart: 0.009,
+    accelFactor: 11,
+    accelCap: 0.44,
+    fastSpinSpeed: 0.024,
+    mediumSpinSpeed: 0.013,
+    directionLockAngle: 0.05,
+    maxStepsFast: 2,
+    maxStepsMedium: 1,
   },
 };
 const BRICK_LEVEL_LAYOUTS = [
@@ -1343,6 +1343,38 @@ function getLibraryViewKey() {
   return libraryPath[libraryPath.length - 1] || "main";
 }
 
+function setLibrarySelection(index, libraryState = getLibraryState()) {
+  const items = Array.isArray(libraryState?.items) ? libraryState.items : [];
+  if (items.length === 0) {
+    selectedIndex = 0;
+    highlightedSongId = "";
+    return null;
+  }
+
+  const nextIndex = Math.max(0, Math.min(Number(index) || 0, items.length - 1));
+  selectedIndex = nextIndex;
+  highlightedSongId = String(items[nextIndex]?.id || "");
+  return items[nextIndex] || null;
+}
+
+function getSelectedLibraryItem(libraryState = getLibraryState()) {
+  const items = Array.isArray(libraryState?.items) ? libraryState.items : [];
+  if (items.length === 0) {
+    selectedIndex = 0;
+    highlightedSongId = "";
+    return null;
+  }
+
+  const highlightedIndex = highlightedSongId
+    ? items.findIndex((item) => String(item?.id || "") === highlightedSongId)
+    : -1;
+  if (highlightedIndex !== -1) {
+    return setLibrarySelection(highlightedIndex, libraryState);
+  }
+
+  return setLibrarySelection(selectedIndex, libraryState);
+}
+
 function getLibraryState() {
   const displaySongs = getDisplaySongs();
   const displayPhotos = getDisplayPhotos();
@@ -1453,21 +1485,33 @@ function getLibraryState() {
           },
           {
             type: "menu",
-            id: "spotify",
-            title: "Spotify",
-            meta: spotifyConnectedMeta,
+            id: "songs",
+            title: "Songs",
+            meta: musicSummary,
           },
           {
             type: "menu",
-            id: "downloaded",
-            title: "Downloaded",
-            meta: musicSummary,
+            id: "playlists",
+            title: "Playlists",
+            meta: musicSongs.length === 0 ? "Converted" : `${Math.max(1, Math.min(9, musicSongs.length))} Mix`,
+          },
+          {
+            type: "menu",
+            id: "spotify",
+            title: "Spotify",
+            meta: spotifyConnectedMeta,
           },
           {
             type: "action",
             id: "music-shuffle",
             title: "Shuffle",
             meta: spotifyViewState.connected ? "All Sources" : "Downloaded",
+          },
+          {
+            type: "action",
+            id: "convert",
+            title: "Convert",
+            meta: "Add Music",
           },
         ],
       };
@@ -1539,6 +1583,16 @@ function getLibraryState() {
                     },
                   ]
                 : []),
+              ...(spotifyLibraryData.tracks.length > 0
+                ? [
+                    {
+                      type: "menu",
+                      id: "spotify-songs",
+                      title: "Songs",
+                      meta: `${spotifyLibraryData.tracks.length} song${spotifyLibraryData.tracks.length === 1 ? "" : "s"}`,
+                    },
+                  ]
+                : []),
               ...(spotifyLibraryData.artists.length > 0
                 ? [
                     {
@@ -1556,16 +1610,6 @@ function getLibraryState() {
                       id: "spotify-albums",
                       title: "Albums",
                       meta: `${spotifyLibraryData.albums.length} album${spotifyLibraryData.albums.length === 1 ? "" : "s"}`,
-                    },
-                  ]
-                : []),
-              ...(spotifyLibraryData.tracks.length > 0
-                ? [
-                    {
-                      type: "menu",
-                      id: "spotify-songs",
-                      title: "Songs",
-                      meta: `${spotifyLibraryData.tracks.length} song${spotifyLibraryData.tracks.length === 1 ? "" : "s"}`,
                     },
                   ]
                 : []),
@@ -1625,6 +1669,12 @@ function getLibraryState() {
               },
               {
                 type: "menu",
+                id: "spotify-songs",
+                title: "Songs",
+                meta: `${spotifyLibraryData.tracks.length} item${spotifyLibraryData.tracks.length === 1 ? "" : "s"}`,
+              },
+              {
+                type: "menu",
                 id: "spotify-albums",
                 title: "Albums",
                 meta: `${spotifyLibraryData.albums.length} item${spotifyLibraryData.albums.length === 1 ? "" : "s"}`,
@@ -1634,12 +1684,6 @@ function getLibraryState() {
                 id: "spotify-artists",
                 title: "Artists",
                 meta: `${spotifyLibraryData.artists.length} item${spotifyLibraryData.artists.length === 1 ? "" : "s"}`,
-              },
-              {
-                type: "menu",
-                id: "spotify-songs",
-                title: "Songs",
-                meta: `${spotifyLibraryData.tracks.length} item${spotifyLibraryData.tracks.length === 1 ? "" : "s"}`,
               },
             ],
       };
@@ -1775,6 +1819,16 @@ function getLibraryState() {
             title: "Converted",
             meta: musicSummary,
           },
+          ...(spotifyViewState.connected && spotifyLibraryData.playlists.length > 0
+            ? [
+                {
+                  type: "menu",
+                  id: "spotify-playlists",
+                  title: "Spotify Playlists",
+                  meta: `${spotifyLibraryData.playlists.length} playlist${spotifyLibraryData.playlists.length === 1 ? "" : "s"}`,
+                },
+              ]
+            : []),
         ],
       };
     case "songs":
@@ -1863,16 +1917,16 @@ function getLibraryState() {
         summary: "",
         items: [
           {
-            type: "action",
-            id: "convert",
-            title: "Converter",
-            meta: "Universal Media",
-          },
-          {
             type: "menu",
             id: "music",
             title: "Music",
             meta: musicSummary,
+          },
+          {
+            type: "action",
+            id: "sync",
+            title: "Sync",
+            meta: "Utility",
           },
           {
             type: "menu",
@@ -1891,12 +1945,6 @@ function getLibraryState() {
             id: "games",
             title: "Games",
             meta: "Built-in",
-          },
-          {
-            type: "action",
-            id: "sync",
-            title: "Sync",
-            meta: "Utility",
           },
           {
             type: "menu",
@@ -1923,10 +1971,11 @@ function clampSelectedIndex() {
   const libraryState = getLibraryState();
   if (libraryState.items.length === 0) {
     selectedIndex = 0;
+    highlightedSongId = "";
     return;
   }
 
-  selectedIndex = Math.max(0, Math.min(selectedIndex, libraryState.items.length - 1));
+  getSelectedLibraryItem(libraryState);
 }
 
 function pulseLibrarySelection() {
@@ -2000,9 +2049,7 @@ function moveLibrarySelection(step, source = "generic") {
     return;
   }
 
-  selectedIndex = nextIndex;
-  const selectedItem = libraryState.items[selectedIndex];
-  highlightedSongId = selectedItem?.type === "song" ? selectedItem.id : "";
+  setLibrarySelection(nextIndex, libraryState);
   if (source === "wheel") {
     haptics.tick();
     pulseLibrarySelection();
@@ -2011,6 +2058,53 @@ function moveLibrarySelection(step, source = "generic") {
     pulseLibrarySelection();
   }
   syncUi();
+}
+
+function getWheelPrecisionMultiplier() {
+  if (screenMode === "coverflow") {
+    return 1.14;
+  }
+
+  if (screenMode !== "library") {
+    return 1;
+  }
+
+  const itemCount = getLibraryState().items.length;
+  if (itemCount <= 0) {
+    return 1;
+  }
+
+  let multiplier = 1;
+  if (itemCount <= VISIBLE_LIBRARY_ITEMS) {
+    multiplier += 0.5;
+  } else if (itemCount <= VISIBLE_LIBRARY_ITEMS * 2) {
+    multiplier += 0.28;
+  } else if (itemCount <= VISIBLE_LIBRARY_ITEMS * 4) {
+    multiplier += 0.12;
+  }
+
+  const edgeDistance = Math.min(selectedIndex, itemCount - 1 - selectedIndex);
+  if (edgeDistance <= 1) {
+    multiplier += 0.18;
+  } else if (edgeDistance <= 3) {
+    multiplier += 0.08;
+  }
+
+  return multiplier;
+}
+
+function getWheelScrollDamping(deltaY) {
+  const magnitude = Math.abs(deltaY);
+  if (magnitude < 4) {
+    return 0.38;
+  }
+  if (magnitude < 12) {
+    return 0.5;
+  }
+  if (magnitude < 24) {
+    return 0.62;
+  }
+  return 0.72;
 }
 
 function getWheelPolarPosition(event) {
@@ -2126,7 +2220,8 @@ function handleWheelScrollDelta(deltaY) {
     return false;
   }
 
-  const direction = Math.sign(deltaY);
+  const dampedDeltaY = deltaY * getWheelScrollDamping(deltaY);
+  const direction = Math.sign(dampedDeltaY);
   if (direction !== 0 && screenScrollDirection !== 0 && direction !== screenScrollDirection) {
     screenScrollAccumulator = 0;
   }
@@ -2134,7 +2229,7 @@ function handleWheelScrollDelta(deltaY) {
     screenScrollDirection = direction;
   }
 
-  screenScrollAccumulator += deltaY;
+  screenScrollAccumulator += dampedDeltaY;
 
   while (screenScrollAccumulator >= WHEEL_SCROLL_STEP_DELTA) {
     handleWheelStep(1);
@@ -2165,14 +2260,21 @@ function scheduleWheelFrame() {
 
     const profile = wheelDrag.profile || WHEEL_POINTER_PROFILES.coarse;
     const speed = Math.abs(wheelDrag.smoothedVelocity);
+    const precisionMultiplier = getWheelPrecisionMultiplier();
     const detentAngle =
       speed >= profile.fastSpinSpeed
-        ? profile.detentAngle * 0.82
+        ? profile.detentAngle * 0.92 * precisionMultiplier
         : speed >= profile.mediumSpinSpeed
-          ? profile.detentAngle * 0.9
-          : profile.detentAngle;
+          ? profile.detentAngle * precisionMultiplier
+          : profile.detentAngle * 1.08 * precisionMultiplier;
     const maxSteps =
-      speed >= profile.fastSpinSpeed ? profile.maxStepsFast : speed >= profile.mediumSpinSpeed ? profile.maxStepsMedium : 1;
+      precisionMultiplier >= 1.15
+        ? 1
+        : speed >= profile.fastSpinSpeed
+          ? profile.maxStepsFast
+          : speed >= profile.mediumSpinSpeed
+            ? profile.maxStepsMedium
+            : 1;
     let stepsTaken = 0;
 
     while (wheelDrag.detentAccumulator >= detentAngle && stepsTaken < maxSteps) {
@@ -4293,10 +4395,10 @@ async function activateLibraryItem(itemData) {
 function renderLibrary() {
   libraryList.innerHTML = "";
   const libraryState = getLibraryState();
+  const selectedItem = getSelectedLibraryItem(libraryState);
   libraryLabel.textContent = libraryState.label;
   libraryTitle.textContent = libraryState.title;
   libraryPanel.dataset.libraryView = getLibraryViewKey();
-  clampSelectedIndex();
   const { items } = libraryState;
   const shouldShowSummary = Boolean(libraryState.summary);
 
@@ -4326,7 +4428,7 @@ function renderLibrary() {
     const itemTitle = document.createElement("span");
     const itemMeta = document.createElement("span");
     const itemIndex = startIndex + offset;
-    const isSelected = itemIndex === selectedIndex;
+    const isSelected = itemIndex === selectedIndex && itemData.id === selectedItem?.id;
     const isPlayingTrack =
       Boolean(currentSong) &&
       ((itemData.type === "song" && itemData.id === currentSong.id) ||
@@ -4368,13 +4470,11 @@ function renderLibrary() {
         return;
       }
 
-      selectedIndex = itemIndex;
-      highlightedSongId = itemData.type === "song" ? itemData.id : "";
+      setLibrarySelection(itemIndex, libraryState);
       syncUi();
     });
     row.addEventListener("click", async () => {
-      selectedIndex = itemIndex;
-      highlightedSongId = itemData.type === "song" ? itemData.id : "";
+      setLibrarySelection(itemIndex, libraryState);
       await activateLibraryItem(itemData);
     });
 
@@ -6615,7 +6715,7 @@ selectButton.addEventListener("click", async () => {
 
   if (screenMode === "library") {
     const libraryState = getLibraryState();
-    const selectedItem = libraryState.items[selectedIndex];
+    const selectedItem = getSelectedLibraryItem(libraryState);
     if (!selectedItem) {
       return;
     }
