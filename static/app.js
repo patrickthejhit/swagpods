@@ -353,6 +353,8 @@ let spotifySdkDeviceId = "";
 let spotifySdkReady = false;
 let spotifySdkInitPromise = null;
 let spotifySearchDebounceTimer = null;
+const SPOTIFY_SDK_DEVICE_WAIT_MS = 250;
+const SPOTIFY_SDK_DEVICE_WAIT_ATTEMPTS = 12;
 const SPOTIFY_PKCE_STORAGE_KEY = "swagpods.spotify.pkce";
 const SPOTIFY_AUTH_STORAGE_KEY = "swagpods.spotify.auth";
 const REQUIRED_SPOTIFY_SCOPES = [
@@ -365,6 +367,46 @@ const REQUIRED_SPOTIFY_SCOPES = [
   "user-modify-playback-state",
   "streaming",
 ];
+
+function logSpotifyConsole(level, message, detail = undefined) {
+  if (typeof console === "undefined") {
+    return;
+  }
+  const method = typeof console[level] === "function" ? level : "log";
+  if (detail === undefined) {
+    console[method]("[SwagPods Spotify]", message);
+    return;
+  }
+  console[method]("[SwagPods Spotify]", message, detail);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function clearSpotifySdkState(reason = "") {
+  if (reason) {
+    logSpotifyConsole("info", "Resetting Spotify SDK state", {
+      reason,
+      deviceId: spotifySdkDeviceId || "",
+    });
+  }
+  if (spotifySdkPlayer && typeof spotifySdkPlayer.disconnect === "function") {
+    try {
+      spotifySdkPlayer.disconnect();
+    } catch (error) {
+      logSpotifyConsole("warn", "Spotify SDK disconnect failed", {
+        reason,
+        error: error.message || String(error),
+      });
+    }
+  }
+  spotifySdkPlayer = null;
+  spotifySdkDeviceId = "";
+  spotifySdkReady = false;
+}
 
 const haptics = (() => {
   const lastFireTimes = new Map();
@@ -2161,6 +2203,57 @@ function getMissingSpotifyScopes(authState = loadSpotifyAuthState()) {
   return REQUIRED_SPOTIFY_SCOPES.filter((scope) => !grantedScopes.has(scope));
 }
 
+function getSpotifyPlaybackDiagnostics() {
+  const authState = loadSpotifyAuthState();
+  const expiresAt = Number(authState?.expiresAt || 0);
+  const expiresInSeconds = expiresAt > 0 ? Math.max(0, Math.round((expiresAt - Date.now()) / 1000)) : 0;
+  return {
+    sdkReady: spotifySdkReady,
+    sdkDeviceId: spotifySdkDeviceId || "",
+    activeDeviceId: spotifyPlayerState.deviceId || "",
+    hasAccessToken: Boolean(authState?.accessToken),
+    hasRefreshToken: Boolean(authState?.refreshToken),
+    expiresInSeconds,
+    missingScopes: getMissingSpotifyScopes(authState),
+  };
+}
+
+function isSpotifyPlaybackApiUrl(url) {
+  return /\/me\/player(?:\/|$)/.test(url);
+}
+
+function buildSpotifyApiLogDetail(url, method, status, payload = {}) {
+  const normalizedPayload = payload && typeof payload === "object" ? payload : {};
+  const detail = {
+    method,
+    path: url.replace(/^https:\/\/api\.spotify\.com\/v1/, ""),
+    status,
+  };
+  const deviceId = normalizedPayload?.device?.id || normalizedPayload?.deviceId || "";
+  const contextUri = normalizedPayload?.context?.uri || normalizedPayload?.contextUri || "";
+  const errorMessage =
+    normalizedPayload?.error?.message ||
+    normalizedPayload?.error_description ||
+    normalizedPayload?.error ||
+    "";
+  if (deviceId) {
+    detail.deviceId = deviceId;
+  }
+  if (contextUri) {
+    detail.contextUri = contextUri;
+  }
+  if (typeof normalizedPayload?.is_playing === "boolean") {
+    detail.isPlaying = normalizedPayload.is_playing;
+  }
+  if (typeof normalizedPayload?.isPlaying === "boolean") {
+    detail.isPlaying = normalizedPayload.isPlaying;
+  }
+  if (errorMessage) {
+    detail.error = errorMessage;
+  }
+  return detail;
+}
+
 function base64UrlEncode(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -2259,12 +2352,20 @@ async function spotifyApiRequest(pathOrUrl, options = {}, retry = true) {
   const url = pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")
     ? pathOrUrl
     : `https://api.spotify.com/v1${pathOrUrl}`;
+  const method = options.method || "GET";
   const response = await fetch(url, {
     ...options,
     headers,
   });
 
   if (response.status === 204) {
+    if (isSpotifyPlaybackApiUrl(url)) {
+      logSpotifyConsole("info", "Spotify playback API response", {
+        method,
+        path: url.replace(/^https:\/\/api\.spotify\.com\/v1/, ""),
+        status: 204,
+      });
+    }
     return null;
   }
 
@@ -2277,8 +2378,15 @@ async function spotifyApiRequest(pathOrUrl, options = {}, retry = true) {
   }
 
   if (response.status === 401 && retry) {
+    if (isSpotifyPlaybackApiUrl(url)) {
+      logSpotifyConsole("warn", "Spotify playback API returned 401, refreshing token", buildSpotifyApiLogDetail(url, method, response.status, payload));
+    }
     await refreshSpotifyAccessToken();
     return spotifyApiRequest(pathOrUrl, options, false);
+  }
+
+  if (isSpotifyPlaybackApiUrl(url)) {
+    logSpotifyConsole(response.ok ? "info" : "warn", "Spotify playback API response", buildSpotifyApiLogDetail(url, method, response.status, payload));
   }
 
   if (!response.ok) {
@@ -3456,8 +3564,12 @@ async function activateLibraryItem(itemData) {
         await previewAudio.play();
       }
     } catch (error) {
-      setMessage(error.message || "Playback could not start.", "error");
-      syncUi();
+      if (spotifyViewState.connected && (isSpotifyRemoteSong() || !currentSong)) {
+        presentSpotifyPlaybackFailure(error, spotifyPlaybackContext.selectedTrack, spotifyPlaybackContext.selectedContextUri);
+      } else {
+        setMessage(error.message || "Playback could not start.", "error");
+        syncUi();
+      }
     }
     return;
   }
@@ -3492,11 +3604,7 @@ async function activateLibraryItem(itemData) {
       syncUi();
       startSpotifyPlayerPolling();
     } catch (error) {
-      if (String(error.message || "").toLowerCase().includes("playback device")) {
-        showSpotifyPlaybackHelp("Select a playback device.");
-      }
-      setMessage(error.message, "error");
-      syncUi();
+      presentSpotifyPlaybackFailure(error);
     }
     return;
   }
@@ -3541,8 +3649,7 @@ async function activateLibraryItem(itemData) {
     try {
       await openSpotifyNowPlaying();
     } catch (error) {
-      setMessage(error.message, "error");
-      syncUi();
+      presentSpotifyPlaybackFailure(error);
     }
     return;
   }
@@ -3554,11 +3661,7 @@ async function activateLibraryItem(itemData) {
       syncUi();
       startSpotifyPlayerPolling();
     } catch (error) {
-      if (String(error.message || "").toLowerCase().includes("playback device")) {
-        showSpotifyPlaybackHelp("Select a playback device.");
-      }
-      setMessage(error.message, "error");
-      syncUi();
+      presentSpotifyPlaybackFailure(error);
     }
     return;
   }
@@ -3575,13 +3678,10 @@ async function activateLibraryItem(itemData) {
 
   if (itemData.type === "action" && String(itemData.id || "").startsWith("spotify-playlist:")) {
     const playlist = itemData.spotifyPlaylist || null;
-    if (playlist?.spotifyUrl) {
-      setMessage(
-        `Playlist loaded: ${playlist.name}. Next step is matching it to your local files.`,
-        "success"
-      );
-    } else {
-      setMessage("Spotify playlist loaded for local-library mapping.", "success");
+    try {
+      await startSpotifyPlaylistPlayback(playlist);
+    } catch (error) {
+      presentSpotifyPlaybackFailure(error);
     }
     return;
   }
@@ -3590,11 +3690,7 @@ async function activateLibraryItem(itemData) {
     try {
       await playSpotifyTrack(itemData.spotifyTrack, itemData.spotifyContextUri || "");
     } catch (error) {
-      if (String(error.message || "").toLowerCase().includes("playback device")) {
-        showSpotifyPlaybackHelp("Select a playback device.");
-      }
-      setMessage(error.message, "error");
-      syncUi();
+      presentSpotifyPlaybackFailure(error, itemData.spotifyTrack, itemData.spotifyContextUri || "");
     }
     return;
   }
@@ -3677,13 +3773,24 @@ async function activateLibraryItem(itemData) {
 
     if (String(itemData.id || "").startsWith("spotify-playlist-detail:")) {
       const playlistId = itemData.id.split(":")[1] || "";
+      let detail = null;
       try {
         await ensureSpotifyPlaylistDetail(playlistId);
+        detail = spotifyLibraryData.playlistDetails[playlistId] || itemData.spotifyPlaylist || null;
       } catch (error) {
         setMessage(error.message, "error");
         syncUi();
         return;
       }
+      libraryPath = [...libraryPath, itemData.id];
+      selectedIndex = 0;
+      highlightedSongId = detail?.tracks?.[0]?.id || "";
+      try {
+        await startSpotifyPlaylistPlayback(detail);
+      } catch (error) {
+        presentSpotifyPlaybackFailure(error, detail?.tracks?.[0] || null, detail?.uri || "");
+      }
+      return;
     }
 
     if (String(itemData.id || "").startsWith("spotify-album-detail:")) {
@@ -4099,14 +4206,54 @@ async function initializeSpotifySdk() {
   }
 
   spotifySdkInitPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    const resolveReady = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve();
+    };
+    const rejectReady = (error) => {
+      const normalizedError = error instanceof Error ? error : new Error(String(error || "Spotify playback failed."));
+      if (settled) {
+        logSpotifyConsole("error", "Spotify SDK error after initialization", {
+          error: normalizedError.message,
+          deviceId: spotifySdkDeviceId || "",
+        });
+        return;
+      }
+      settled = true;
+      reject(normalizedError);
+    };
+    const handlePlayerError = (eventName, message, rejectInitialization = false) => {
+      const normalizedMessage = String(message || "Spotify playback failed.").trim() || "Spotify playback failed.";
+      logSpotifyConsole(rejectInitialization ? "error" : "warn", `Spotify SDK ${eventName}`, {
+        message: normalizedMessage,
+        deviceId: spotifySdkDeviceId || "",
+      });
+      if (!rejectInitialization) {
+        setMessage(normalizedMessage, "error");
+        return;
+      }
+      clearSpotifySdkState(`sdk ${eventName}`);
+      rejectReady(new Error(normalizedMessage));
+    };
     const startPlayer = () => {
       if (!isSpotifySdkAvailable()) {
-        reject(new Error("Spotify browser playback is not available in this browser."));
+        rejectReady(new Error("Spotify browser playback is not available in this browser."));
         return;
       }
 
+      if (spotifySdkPlayer && !spotifySdkReady) {
+        clearSpotifySdkState("restarting stale SDK player");
+      }
+
       if (spotifySdkPlayer) {
-        resolve();
+        logSpotifyConsole("info", "Reusing ready Spotify SDK player", {
+          deviceId: spotifySdkDeviceId || "",
+        });
+        resolveReady();
         return;
       }
 
@@ -4122,19 +4269,26 @@ async function initializeSpotifySdk() {
         },
         volume: 0.8,
       });
+      spotifySdkPlayer = player;
+      logSpotifyConsole("info", "Initializing Spotify Web Playback SDK", getSpotifyPlaybackDiagnostics());
 
       player.addListener("ready", ({ device_id }) => {
         spotifySdkDeviceId = device_id;
         spotifySdkReady = true;
-        resolve();
+        logSpotifyConsole("info", "Spotify SDK ready", { deviceId: device_id || "" });
+        resolveReady();
       });
-      player.addListener("not_ready", () => {
+      player.addListener("not_ready", ({ device_id }) => {
+        const offlineDeviceId = device_id || spotifySdkDeviceId || "";
         spotifySdkReady = false;
+        logSpotifyConsole("warn", "Spotify SDK device not ready", {
+          deviceId: offlineDeviceId,
+        });
       });
-      player.addListener("initialization_error", ({ message }) => reject(new Error(message)));
-      player.addListener("authentication_error", ({ message }) => reject(new Error(message)));
-      player.addListener("account_error", ({ message }) => reject(new Error(message)));
-      player.addListener("playback_error", ({ message }) => reject(new Error(message)));
+      player.addListener("initialization_error", ({ message }) => handlePlayerError("initialization_error", message, true));
+      player.addListener("authentication_error", ({ message }) => handlePlayerError("authentication_error", message, true));
+      player.addListener("account_error", ({ message }) => handlePlayerError("account_error", message, true));
+      player.addListener("playback_error", ({ message }) => handlePlayerError("playback_error", message, false));
       player.addListener("player_state_changed", (state) => {
         if (!state || !state.track_window?.current_track) {
           return;
@@ -4167,12 +4321,16 @@ async function initializeSpotifySdk() {
       });
 
       player.connect().then((connected) => {
+        logSpotifyConsole("info", "Spotify SDK connect result", { connected: Boolean(connected) });
         if (!connected) {
-          reject(new Error("Spotify browser playback could not connect."));
+          clearSpotifySdkState("sdk connect returned false");
+          rejectReady(new Error("Spotify browser playback could not connect."));
           return;
         }
-        spotifySdkPlayer = player;
-      }).catch((error) => reject(new Error(error.message || "Spotify browser playback failed to connect.")));
+      }).catch((error) => {
+        clearSpotifySdkState("sdk connect failed");
+        rejectReady(new Error(error.message || "Spotify browser playback failed to connect."));
+      });
     };
 
     if (isSpotifySdkAvailable()) {
@@ -4545,6 +4703,7 @@ async function disconnectSpotify() {
   clearSpotifyPkceState();
   clearSpotifyAuthState();
   stopSpotifyPlayerPolling();
+  clearSpotifySdkState("spotify disconnected");
   spotifyPlayerState = normalizeSpotifyPlayerState();
   spotifyPlaybackContext = {
     selectedTrack: null,
@@ -4627,10 +4786,15 @@ function applySpotifyPlayerResponse(payload = {}, fallbackTrack = null, fallback
     fallbackContextUri ||
     spotifyPlaybackContext.selectedContextUri ||
     "";
+  const resolvedDeviceId =
+    payload?.deviceId ||
+    payload?.targetDeviceId ||
+    (spotifySdkReady ? spotifySdkDeviceId : "") ||
+    "";
   const hasActiveDevice =
     typeof payload?.hasActiveDevice === "boolean"
-      ? payload.hasActiveDevice
-      : Boolean(payload?.deviceId);
+      ? payload.hasActiveDevice || Boolean(resolvedDeviceId)
+      : Boolean(resolvedDeviceId);
   const normalizedTrack = normalizeSpotifyTrack(payload?.track || fallbackTrack, normalizedContextUri);
 
   spotifyPlayerState = normalizeSpotifyPlayerState({
@@ -4639,7 +4803,7 @@ function applySpotifyPlayerResponse(payload = {}, fallbackTrack = null, fallback
     hasActiveDevice,
     deviceName: payload?.deviceName || (hasActiveDevice && spotifySdkReady ? "SwagPods Web Player" : ""),
     deviceType: payload?.deviceType || (hasActiveDevice && spotifySdkReady ? "Web" : ""),
-    deviceId: payload?.deviceId || "",
+    deviceId: resolvedDeviceId,
     contextUri: normalizedContextUri,
     track: normalizedTrack,
   });
@@ -4662,14 +4826,58 @@ function applySpotifyPlayerResponse(payload = {}, fallbackTrack = null, fallback
   return spotifyPlayerState;
 }
 
+async function waitForSpotifySdkDevice() {
+  if (spotifySdkReady && spotifySdkDeviceId) {
+    return spotifySdkDeviceId;
+  }
+  if (!spotifySdkInitPromise && !spotifySdkPlayer) {
+    return "";
+  }
+  for (let attempt = 0; attempt < SPOTIFY_SDK_DEVICE_WAIT_ATTEMPTS; attempt += 1) {
+    if (spotifySdkReady && spotifySdkDeviceId) {
+      return spotifySdkDeviceId;
+    }
+    await sleep(SPOTIFY_SDK_DEVICE_WAIT_MS);
+  }
+  return spotifySdkDeviceId || "";
+}
+
 async function ensureSpotifyPlaybackGesture() {
+  let initializationError = null;
   try {
     await initializeSpotifySdk();
   } catch (error) {
+    initializationError = error;
     spotifySdkReady = false;
+    logSpotifyConsole("warn", "Spotify SDK initialization did not complete", {
+      error: error.message || String(error),
+    });
   }
   if (spotifySdkPlayer && typeof spotifySdkPlayer.activateElement === "function") {
-    await spotifySdkPlayer.activateElement();
+    try {
+      await spotifySdkPlayer.activateElement();
+      logSpotifyConsole("info", "Spotify playback activated from user gesture", {
+        deviceId: spotifySdkDeviceId || "",
+      });
+    } catch (error) {
+      logSpotifyConsole("warn", "Spotify playback activation failed", {
+        error: error.message || String(error),
+        deviceId: spotifySdkDeviceId || "",
+      });
+      if (!initializationError) {
+        initializationError = error;
+      }
+    }
+  }
+  const readyDeviceId = await waitForSpotifySdkDevice();
+  if (readyDeviceId) {
+    logSpotifyConsole("info", "Spotify playback device ready", {
+      deviceId: readyDeviceId,
+    });
+  } else if (initializationError) {
+    logSpotifyConsole("warn", "Spotify playback continuing without local SDK device", {
+      error: initializationError.message || String(initializationError),
+    });
   }
 }
 
@@ -4687,9 +4895,15 @@ async function requestSpotifyPlayerCommand(action, options = {}) {
     spotifyPlaybackContext.selectedContextUri ||
     spotifyPlaybackContext.lastContextUri ||
     "";
+  const requestedDeviceId =
+    options.deviceId ||
+    (await waitForSpotifySdkDevice()) ||
+    spotifySdkDeviceId ||
+    spotifyPlayerState.deviceId ||
+    "";
   const payload = {
     action,
-    deviceId: options.deviceId || spotifySdkDeviceId || spotifyPlayerState.deviceId || "",
+    deviceId: requestedDeviceId,
   };
   if (fallbackTrack?.uri) {
     payload.trackUri = fallbackTrack.uri;
@@ -4703,14 +4917,39 @@ async function requestSpotifyPlayerCommand(action, options = {}) {
   if (typeof options.shuffle === "boolean") {
     payload.shuffle = options.shuffle;
   }
-  const response = await fetchJson("/api/spotify/player/command", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  logSpotifyConsole("info", "Sending Spotify player command", {
+    action,
+    requestedDeviceId,
+    trackUri: payload.trackUri || "",
+    contextUri: payload.contextUri || "",
+    shuffle: Boolean(payload.shuffle),
+    diagnostics: getSpotifyPlaybackDiagnostics(),
   });
-  return applySpotifyPlayerResponse(response, fallbackTrack, fallbackContextUri);
+  try {
+    const response = await fetchJson("/api/spotify/player/command", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    logSpotifyConsole("info", "Spotify player command completed", {
+      action,
+      requestedDeviceId,
+      targetDeviceId: response?.targetDeviceId || response?.deviceId || "",
+      isPlaying: Boolean(response?.isPlaying),
+    });
+    return applySpotifyPlayerResponse(response, fallbackTrack, fallbackContextUri);
+  } catch (error) {
+    logSpotifyConsole("error", "Spotify player command failed", {
+      action,
+      requestedDeviceId,
+      trackUri: payload.trackUri || "",
+      contextUri: payload.contextUri || "",
+      error: error.message || String(error),
+    });
+    throw error;
+  }
 }
 
 async function sendSpotifyPlayerCommand(action, options = {}) {
@@ -4824,6 +5063,41 @@ async function startSpotifyPlaybackFromEmptyState() {
   throw new Error("No Spotify tracks were found in your saved songs or playlists.");
 }
 
+async function startSpotifyPlaylistPlayback(playlistDetail = null) {
+  if (!spotifyViewState.connected) {
+    throw new Error("Connect Spotify first.");
+  }
+
+  if (!spotifyLibraryData.loaded && !spotifyLibraryData.loading) {
+    await refreshSpotifyLibrary();
+  }
+
+  let activePlaylist = playlistDetail || getCurrentSpotifyPlaylistDetail();
+  if (!activePlaylist?.id) {
+    const playlistId = activePlaylist?.id || "";
+    if (playlistId && !spotifyLibraryData.playlistDetails[playlistId]) {
+      await ensureSpotifyPlaylistDetail(playlistId);
+    }
+    activePlaylist = playlistId ? spotifyLibraryData.playlistDetails[playlistId] || activePlaylist : activePlaylist;
+  }
+
+  if (activePlaylist?.id && !spotifyLibraryData.playlistDetails[activePlaylist.id]) {
+    await ensureSpotifyPlaylistDetail(activePlaylist.id);
+    activePlaylist = spotifyLibraryData.playlistDetails[activePlaylist.id] || activePlaylist;
+  }
+
+  if (activePlaylist?.uri && activePlaylist?.tracks?.length > 0) {
+    const firstTrack = activePlaylist.tracks[0];
+    await playSpotifyContext(activePlaylist.uri, firstTrack, {
+      shuffle: false,
+      enterNowPlaying: true,
+    });
+    return activePlaylist;
+  }
+
+  throw new Error("No playable tracks were found in this Spotify playlist.");
+}
+
 function showSpotifyPlaybackHelp(message) {
   const normalizedMessage = String(message || "").trim();
   const needsDevice = normalizedMessage.toLowerCase().includes("device");
@@ -4844,6 +5118,42 @@ function showSpotifyPlaybackHelp(message) {
   });
   screenMode = "now-playing";
   syncUi();
+}
+
+function showSpotifyPlaybackError(message, track = null, contextUri = "") {
+  const normalizedMessage = String(message || "Spotify playback failed.").trim() || "Spotify playback failed.";
+  const selectedTrack = normalizeSpotifyTrack(track, contextUri);
+  const sourceTrack = selectedTrack || spotifyPlaybackContext.selectedTrack || spotifyPlaybackContext.lastTrack || null;
+  const fallbackSong = sourceTrack ? buildSpotifySong(sourceTrack, sourceTrack.contextUri || contextUri || "") : null;
+  setCurrentSong(
+    fallbackSong || {
+      id: "spotify-error",
+      fileName: "",
+      title: "Playback Failed",
+      artist: "Spotify",
+      album: normalizedMessage,
+      durationSeconds: 0,
+      playbackUrl: "",
+      downloadUrl: "#",
+      spotifyUrl: "",
+      artworkUrl: null,
+      uri: "",
+      contextUri: "",
+      source: "spotify",
+    }
+  );
+  screenMode = "now-playing";
+  syncUi();
+}
+
+function presentSpotifyPlaybackFailure(error, track = null, contextUri = "") {
+  const message = error?.message || String(error || "Spotify playback failed.");
+  if (String(message).toLowerCase().includes("playback device")) {
+    showSpotifyPlaybackHelp("Select a playback device.");
+  } else {
+    showSpotifyPlaybackError(message, track, contextUri);
+  }
+  setMessage(message, "error");
 }
 
 async function ensureSpotifyPlaybackOnNowPlaying() {
@@ -5405,10 +5715,11 @@ rewindButton.addEventListener("click", async () => {
     try {
       await sendSpotifyPlayerCommand("previous");
     } catch (error) {
-      if (String(error.message || "").toLowerCase().includes("playback device")) {
-        showSpotifyPlaybackHelp("Select a playback device.");
-      }
-      setMessage(error.message, "error");
+      presentSpotifyPlaybackFailure(
+        error,
+        spotifyPlayerState.track || spotifyPlaybackContext.selectedTrack,
+        spotifyPlayerState.contextUri || spotifyPlaybackContext.selectedContextUri
+      );
     }
     return;
   }
@@ -5464,10 +5775,11 @@ forwardButton.addEventListener("click", async () => {
     try {
       await sendSpotifyPlayerCommand("next");
     } catch (error) {
-      if (String(error.message || "").toLowerCase().includes("playback device")) {
-        showSpotifyPlaybackHelp("Select a playback device.");
-      }
-      setMessage(error.message, "error");
+      presentSpotifyPlaybackFailure(
+        error,
+        spotifyPlayerState.track || spotifyPlaybackContext.selectedTrack,
+        spotifyPlayerState.contextUri || spotifyPlaybackContext.selectedContextUri
+      );
     }
     return;
   }
@@ -5815,12 +6127,7 @@ playbackButton.addEventListener("click", async () => {
     try {
       await startSpotifyPlaybackFromEmptyState();
     } catch (error) {
-      showSpotifyPlaybackHelp(
-        String(error.message || "").toLowerCase().includes("playback device")
-          ? "Select a playback device."
-          : "Pick a song to start music."
-      );
-      setMessage(error.message, "error");
+      presentSpotifyPlaybackFailure(error, spotifyPlaybackContext.selectedTrack, spotifyPlaybackContext.selectedContextUri);
     }
     return;
   }
@@ -5847,12 +6154,11 @@ playbackButton.addEventListener("click", async () => {
         await startSpotifyPlaybackFromEmptyState();
       }
     } catch (error) {
-      showSpotifyPlaybackHelp(
-        String(error.message || "").toLowerCase().includes("playback device")
-          ? "Select a playback device."
-          : "Pick a song to start music."
+      presentSpotifyPlaybackFailure(
+        error,
+        spotifyPlayerState.track || spotifyPlaybackContext.selectedTrack,
+        spotifyPlayerState.contextUri || spotifyPlaybackContext.selectedContextUri
       );
-      setMessage(error.message, "error");
     }
     return;
   }

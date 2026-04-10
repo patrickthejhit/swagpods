@@ -168,6 +168,18 @@ SYNC_ENV_CACHE = {
 }
 
 
+def log_spotify_playback(message: str, **details: object) -> None:
+    payload = {
+        key: value
+        for key, value in details.items()
+        if value is not None and value != ""
+    }
+    if payload:
+        app.logger.info("[spotify-playback] %s %s", message, json.dumps(payload, sort_keys=True))
+        return
+    app.logger.info("[spotify-playback] %s", message)
+
+
 def ensure_directories() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -661,9 +673,51 @@ def fetch_spotify_player_state_payload() -> dict[str, object]:
     }
 
 
+def fetch_spotify_devices(access_token: str) -> list[dict[str, object]]:
+    payload = spotify_api_get(access_token, "/me/player/devices")
+    return [item for item in payload.get("devices", []) if isinstance(item, dict)]
+
+
+def filter_spotify_available_devices(devices: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        item
+        for item in devices
+        if str(item.get("id", "")).strip() and not bool(item.get("is_restricted"))
+    ]
+
+
+def wait_for_spotify_device(
+    access_token: str,
+    device_id: str,
+    *,
+    require_active: bool = False,
+    attempts: int = 8,
+    delay_seconds: float = 0.35,
+) -> dict[str, object] | None:
+    normalized_device_id = str(device_id).strip()
+    if not normalized_device_id:
+        return None
+
+    for attempt in range(attempts):
+        devices = filter_spotify_available_devices(fetch_spotify_devices(access_token))
+        match = next(
+            (
+                item
+                for item in devices
+                if str(item.get("id", "")).strip() == normalized_device_id
+            ),
+            None,
+        )
+        if match and (not require_active or bool(match.get("is_active"))):
+            return match
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return None
+
+
 def fetch_spotify_devices_payload() -> list[dict[str, object]]:
     access_token = get_valid_spotify_access_token()
-    payload = spotify_api_get(access_token, "/me/player/devices")
+    payload = {"devices": fetch_spotify_devices(access_token)}
     devices: list[dict[str, object]] = []
     for item in payload.get("devices", []):
         if not isinstance(item, dict):
@@ -681,6 +735,7 @@ def fetch_spotify_devices_payload() -> list[dict[str, object]]:
 
 
 def transfer_spotify_playback(access_token: str, device_id: str, *, play: bool = False) -> None:
+    log_spotify_playback("transfer requested", deviceId=device_id, play=play)
     spotify_api_request(
         access_token,
         "PUT",
@@ -691,17 +746,7 @@ def transfer_spotify_playback(access_token: str, device_id: str, *, play: bool =
 
 
 def ensure_spotify_target_device(access_token: str, preferred_device_id: str = "") -> str:
-    devices_payload = spotify_api_get(access_token, "/me/player/devices")
-    devices = [item for item in devices_payload.get("devices", []) if isinstance(item, dict)]
-    available = [
-        item
-        for item in devices
-        if str(item.get("id", "")).strip() and not bool(item.get("is_restricted"))
-    ]
-    if not available:
-        raise RuntimeError(
-            "Select a playback device in Spotify to start music."
-        )
+    available = filter_spotify_available_devices(fetch_spotify_devices(access_token))
 
     preferred = next(
         (
@@ -711,11 +756,31 @@ def ensure_spotify_target_device(access_token: str, preferred_device_id: str = "
         ),
         None,
     )
+    if not preferred and preferred_device_id:
+        log_spotify_playback("waiting for preferred device", preferredDeviceId=preferred_device_id)
+        preferred = wait_for_spotify_device(access_token, preferred_device_id)
+        if preferred:
+            available = filter_spotify_available_devices(fetch_spotify_devices(access_token))
+
     if preferred:
         preferred_id = str(preferred.get("id", "")).strip()
         if not bool(preferred.get("is_active")):
+            log_spotify_playback(
+                "transferring playback to preferred device",
+                preferredDeviceId=preferred_id,
+                deviceName=str(preferred.get("name", "")).strip(),
+                deviceType=str(preferred.get("type", "")).strip(),
+            )
             transfer_spotify_playback(access_token, preferred_id, play=False)
+            active_preferred = wait_for_spotify_device(access_token, preferred_id, require_active=True)
+            if not active_preferred:
+                raise RuntimeError("SwagPods could not activate the selected Spotify device.")
         return preferred_id
+
+    if not available:
+        raise RuntimeError(
+            "Select a playback device in Spotify to start music."
+        )
 
     active = next((item for item in available if bool(item.get("is_active"))), None)
     if active:
@@ -730,7 +795,16 @@ def ensure_spotify_target_device(access_token: str, preferred_device_id: str = "
         available[0],
     )
     device_id = str(fallback.get("id", "")).strip()
+    log_spotify_playback(
+        "transferring playback to fallback device",
+        deviceId=device_id,
+        deviceName=str(fallback.get("name", "")).strip(),
+        deviceType=str(fallback.get("type", "")).strip(),
+    )
     transfer_spotify_playback(access_token, device_id, play=False)
+    active_fallback = wait_for_spotify_device(access_token, device_id, require_active=True)
+    if not active_fallback:
+        raise RuntimeError("SwagPods could not activate a Spotify playback device.")
     return device_id
 
 
@@ -1857,6 +1931,24 @@ def spotify_player_command():
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action", "")).strip().lower()
     device_id = str(payload.get("deviceId", "")).strip()
+    track_uri = str(payload.get("trackUri", "")).strip()
+    context_uri = str(payload.get("contextUri", "")).strip()
+    try:
+        position_ms = int(payload.get("positionMs", 0) or 0)
+    except (TypeError, ValueError):
+        position_ms = 0
+    shuffle_enabled = bool(payload.get("shuffle"))
+    target_device_id = ""
+
+    log_spotify_playback(
+        "command requested",
+        action=action,
+        requestedDeviceId=device_id,
+        trackUri=track_uri,
+        contextUri=context_uri,
+        positionMs=position_ms,
+        shuffle=shuffle_enabled,
+    )
 
     try:
         access_token = get_valid_spotify_access_token()
@@ -1873,10 +1965,6 @@ def spotify_player_command():
             target_device_id = ensure_spotify_target_device(access_token, device_id)
             spotify_api_request(access_token, "POST", "/me/player/previous", params={"device_id": target_device_id})
         elif action == "play-track":
-            track_uri = str(payload.get("trackUri", "")).strip()
-            context_uri = str(payload.get("contextUri", "")).strip()
-            position_ms = int(payload.get("positionMs", 0) or 0)
-            shuffle_enabled = bool(payload.get("shuffle"))
             if not track_uri:
                 return jsonify({"error": "Missing Spotify track URI."}), 400
             target_device_id = ensure_spotify_target_device(access_token, device_id)
@@ -1897,9 +1985,6 @@ def spotify_player_command():
                 body["position_ms"] = position_ms
             spotify_api_request(access_token, "PUT", "/me/player/play", params={"device_id": target_device_id}, body=body)
         elif action == "play-context":
-            context_uri = str(payload.get("contextUri", "")).strip()
-            track_uri = str(payload.get("trackUri", "")).strip()
-            shuffle_enabled = bool(payload.get("shuffle"))
             if not context_uri:
                 return jsonify({"error": "Missing Spotify context URI."}), 400
             target_device_id = ensure_spotify_target_device(access_token, device_id)
@@ -1917,12 +2002,43 @@ def spotify_player_command():
         else:
             return jsonify({"error": "Unsupported Spotify player command."}), 400
     except RuntimeError as error:
+        log_spotify_playback(
+            "command failed",
+            action=action,
+            requestedDeviceId=device_id,
+            targetDeviceId=target_device_id,
+            trackUri=track_uri,
+            contextUri=context_uri,
+            error=str(error),
+        )
         return jsonify({"error": str(error)}), 400
 
     try:
-        return jsonify(fetch_spotify_player_state_payload())
-    except RuntimeError:
-        return jsonify({"ok": True, "connected": True})
+        response_payload = fetch_spotify_player_state_payload()
+    except RuntimeError as error:
+        log_spotify_playback(
+            "player state refresh failed after command",
+            action=action,
+            targetDeviceId=target_device_id,
+            error=str(error),
+        )
+        response_payload = {"ok": True, "connected": True}
+
+    if target_device_id:
+        response_payload["requestedDeviceId"] = device_id
+        response_payload["targetDeviceId"] = target_device_id
+        response_payload["hasActiveDevice"] = bool(response_payload.get("hasActiveDevice")) or True
+        response_payload["deviceId"] = str(response_payload.get("deviceId", "")).strip() or target_device_id
+
+    log_spotify_playback(
+        "command completed",
+        action=action,
+        requestedDeviceId=device_id,
+        targetDeviceId=target_device_id,
+        isPlaying=bool(response_payload.get("isPlaying")),
+        hasActiveDevice=bool(response_payload.get("hasActiveDevice")),
+    )
+    return jsonify(response_payload)
 
 
 @app.get("/api/sync/status")
