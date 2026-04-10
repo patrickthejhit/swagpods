@@ -355,8 +355,23 @@ let spotifySdkInitPromise = null;
 let spotifyServerSessionSyncPromise = null;
 let spotifyServerSessionFingerprint = "";
 let spotifySearchDebounceTimer = null;
+let playbackProgressRafId = 0;
+let transportHoldTimer = 0;
+let transportHoldInterval = 0;
+let transportHoldDirection = 0;
+let transportHoldTriggered = false;
+let transportHoldPointerId = null;
+let transportHoldButton = null;
+let suppressTransportClickDirection = 0;
+let spotifyPendingSeekMs = null;
+let spotifySeekCommitTimer = 0;
 const SPOTIFY_SDK_DEVICE_WAIT_MS = 250;
 const SPOTIFY_SDK_DEVICE_WAIT_ATTEMPTS = 12;
+const TRANSPORT_TAP_SEEK_SECONDS = 5;
+const TRANSPORT_HOLD_SEEK_SECONDS = 2;
+const TRANSPORT_HOLD_DELAY_MS = 260;
+const TRANSPORT_HOLD_INTERVAL_MS = 90;
+const SPOTIFY_SEEK_FLUSH_MS = 120;
 const SPOTIFY_PKCE_STORAGE_KEY = "swagpods.spotify.pkce";
 const SPOTIFY_AUTH_STORAGE_KEY = "swagpods.spotify.auth";
 const REQUIRED_SPOTIFY_SCOPES = [
@@ -385,6 +400,343 @@ function logSpotifyConsole(level, message, detail = undefined) {
 function sleep(ms) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
+  });
+}
+
+function clampPlaybackValue(value, min, max) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return min;
+  }
+  const lowerBound = Number.isFinite(min) ? min : numericValue;
+  const upperBound = Number.isFinite(max) ? max : numericValue;
+  return Math.min(upperBound, Math.max(lowerBound, numericValue));
+}
+
+function resolvePlaybackUrl(url) {
+  if (!url) {
+    return "";
+  }
+  try {
+    return new URL(url, window.location.href).href;
+  } catch (error) {
+    return String(url);
+  }
+}
+
+function isTransportScrubMode() {
+  if (screenMode !== "now-playing" || !currentSong) {
+    return false;
+  }
+  if (isSpotifyRemoteSong(currentSong)) {
+    return Boolean(currentSong.uri || spotifyPlayerState.track?.uri);
+  }
+  return Boolean(currentSong.playbackUrl || previewAudio.currentSrc || previewAudio.src);
+}
+
+function getCurrentTrackDurationSeconds(song = currentSong) {
+  if (!song) {
+    return 0;
+  }
+  if (isSpotifyRemoteSong(song)) {
+    return Math.max(
+      0,
+      Number(song.durationSeconds || 0) ||
+        ((Number(spotifyPlayerState.track?.durationMs || 0) || 0) / 1000)
+    );
+  }
+  const audioDuration = Number.isFinite(previewAudio.duration) ? previewAudio.duration : 0;
+  return audioDuration > 0 ? audioDuration : Math.max(0, Number(song.durationSeconds || 0));
+}
+
+function getCurrentTrackDurationMs(song = currentSong) {
+  return Math.round(getCurrentTrackDurationSeconds(song) * 1000);
+}
+
+function getDisplayedSpotifyProgressMs() {
+  const baseProgressMs = Math.max(0, Number(spotifyPlayerState.progressMs || 0));
+  const durationMs = getCurrentTrackDurationMs();
+  if (!spotifyPlayerState.isPlaying) {
+    return durationMs > 0 ? Math.min(durationMs, baseProgressMs) : baseProgressMs;
+  }
+  const progressTimestampMs = Number(spotifyPlayerState.progressTimestampMs || 0);
+  const elapsedMs = progressTimestampMs > 0 ? Math.max(0, Date.now() - progressTimestampMs) : 0;
+  const predictedProgressMs = baseProgressMs + elapsedMs;
+  return durationMs > 0 ? Math.min(durationMs, predictedProgressMs) : predictedProgressMs;
+}
+
+function shouldAnimatePlaybackProgress() {
+  if (!currentSong) {
+    return false;
+  }
+  if (transportHoldDirection !== 0) {
+    return true;
+  }
+  if (screenMode !== "now-playing") {
+    return false;
+  }
+  if (isSpotifyRemoteSong(currentSong)) {
+    return spotifyPlayerState.isPlaying;
+  }
+  return !previewAudio.paused && !previewAudio.ended;
+}
+
+function stopPlaybackProgressLoop() {
+  if (!playbackProgressRafId) {
+    return;
+  }
+  window.cancelAnimationFrame(playbackProgressRafId);
+  playbackProgressRafId = 0;
+}
+
+function runPlaybackProgressLoop() {
+  renderProgress();
+  if (!shouldAnimatePlaybackProgress()) {
+    stopPlaybackProgressLoop();
+    return;
+  }
+  playbackProgressRafId = window.requestAnimationFrame(runPlaybackProgressLoop);
+}
+
+function syncPlaybackProgressLoop() {
+  if (shouldAnimatePlaybackProgress()) {
+    if (!playbackProgressRafId) {
+      playbackProgressRafId = window.requestAnimationFrame(runPlaybackProgressLoop);
+    }
+    return;
+  }
+  stopPlaybackProgressLoop();
+  renderProgress();
+}
+
+function primeLocalPreviewAudio(song = currentSong) {
+  if (!song || isSpotifyRemoteSong(song)) {
+    return false;
+  }
+  previewAudio.preload = "auto";
+  const nextPlaybackUrl = resolvePlaybackUrl(song.playbackUrl || "");
+  const currentPlaybackUrl = resolvePlaybackUrl(
+    previewAudio.getAttribute("src") || previewAudio.currentSrc || previewAudio.src || ""
+  );
+  if (!nextPlaybackUrl) {
+    return false;
+  }
+  if (nextPlaybackUrl !== currentPlaybackUrl) {
+    previewAudio.src = song.playbackUrl;
+    previewAudio.load();
+    return true;
+  }
+  return false;
+}
+
+async function playCurrentLocalSong() {
+  if (!currentSong || isSpotifyRemoteSong(currentSong)) {
+    return;
+  }
+  primeLocalPreviewAudio(currentSong);
+  const duration = getCurrentTrackDurationSeconds(currentSong);
+  if (
+    duration > 0 &&
+    Number.isFinite(previewAudio.currentTime) &&
+    previewAudio.currentTime >= duration - 0.05
+  ) {
+    try {
+      previewAudio.currentTime = 0;
+    } catch (error) {
+      // Ignore seek failures until metadata is ready.
+    }
+  }
+  syncPlaybackProgressLoop();
+  await previewAudio.play();
+}
+
+function updateSpotifyProgressState(progressMs, isPlaying = spotifyPlayerState.isPlaying) {
+  const durationMs = getCurrentTrackDurationMs();
+  const clampedProgressMs =
+    durationMs > 0
+      ? clampPlaybackValue(progressMs, 0, durationMs)
+      : Math.max(0, Number(progressMs || 0));
+  spotifyPlayerState = normalizeSpotifyPlayerState({
+    ...spotifyPlayerState,
+    isPlaying,
+    progressMs: clampedProgressMs,
+    progressTimestampMs: Date.now(),
+  });
+  syncPlaybackProgressLoop();
+}
+
+async function commitSpotifySeek(positionMs) {
+  const durationMs = getCurrentTrackDurationMs();
+  const clampedPositionMs =
+    durationMs > 0
+      ? clampPlaybackValue(positionMs, 0, durationMs)
+      : Math.max(0, Number(positionMs || 0));
+
+  updateSpotifyProgressState(clampedPositionMs);
+
+  if (
+    spotifySdkPlayer &&
+    spotifySdkReady &&
+    typeof spotifySdkPlayer.seek === "function" &&
+    (!spotifyPlayerState.deviceId || spotifyPlayerState.deviceId === spotifySdkDeviceId)
+  ) {
+    try {
+      await spotifySdkPlayer.seek(clampedPositionMs);
+      logSpotifyConsole("info", "Spotify SDK seek completed", {
+        positionMs: clampedPositionMs,
+        deviceId: spotifySdkDeviceId || "",
+      });
+      return;
+    } catch (error) {
+      logSpotifyConsole("warn", "Spotify SDK seek failed, falling back to API", {
+        error: error.message || String(error),
+        positionMs: clampedPositionMs,
+        deviceId: spotifySdkDeviceId || "",
+      });
+    }
+  }
+
+  await sendSpotifyPlayerCommand("seek", {
+    positionMs: clampedPositionMs,
+    track: spotifyPlayerState.track || spotifyPlaybackContext.selectedTrack,
+    contextUri: spotifyPlayerState.contextUri || spotifyPlaybackContext.selectedContextUri,
+  });
+}
+
+function flushQueuedSpotifySeek() {
+  if (spotifySeekCommitTimer) {
+    window.clearTimeout(spotifySeekCommitTimer);
+    spotifySeekCommitTimer = 0;
+  }
+  if (spotifyPendingSeekMs === null) {
+    return;
+  }
+  const nextPositionMs = spotifyPendingSeekMs;
+  spotifyPendingSeekMs = null;
+  void commitSpotifySeek(nextPositionMs).catch((error) => {
+    presentSpotifyPlaybackFailure(
+      error,
+      spotifyPlayerState.track || spotifyPlaybackContext.selectedTrack,
+      spotifyPlayerState.contextUri || spotifyPlaybackContext.selectedContextUri
+    );
+  });
+}
+
+function queueSpotifySeek(positionMs, immediate = false) {
+  const durationMs = getCurrentTrackDurationMs();
+  const clampedPositionMs =
+    durationMs > 0
+      ? clampPlaybackValue(positionMs, 0, durationMs)
+      : Math.max(0, Number(positionMs || 0));
+
+  spotifyPendingSeekMs = clampedPositionMs;
+  updateSpotifyProgressState(clampedPositionMs);
+
+  if (immediate) {
+    flushQueuedSpotifySeek();
+    return;
+  }
+
+  if (spotifySeekCommitTimer) {
+    return;
+  }
+  spotifySeekCommitTimer = window.setTimeout(() => {
+    spotifySeekCommitTimer = 0;
+    flushQueuedSpotifySeek();
+  }, SPOTIFY_SEEK_FLUSH_MS);
+}
+
+function seekLocalPlaybackBy(offsetSeconds) {
+  const duration = getCurrentTrackDurationSeconds();
+  const currentTime = Number.isFinite(previewAudio.currentTime) ? previewAudio.currentTime : 0;
+  const nextTime =
+    duration > 0
+      ? clampPlaybackValue(currentTime + offsetSeconds, 0, duration)
+      : Math.max(0, currentTime + offsetSeconds);
+  try {
+    previewAudio.currentTime = nextTime;
+  } catch (error) {
+    return;
+  }
+  syncPlaybackProgressLoop();
+}
+
+function seekCurrentPlaybackBy(direction, isHold = false) {
+  if (!isTransportScrubMode()) {
+    return;
+  }
+
+  const seekSeconds = (isHold ? TRANSPORT_HOLD_SEEK_SECONDS : TRANSPORT_TAP_SEEK_SECONDS) * direction;
+  if (isSpotifyRemoteSong(currentSong)) {
+    const nextPositionMs = getDisplayedSpotifyProgressMs() + seekSeconds * 1000;
+    queueSpotifySeek(nextPositionMs, !isHold);
+    return;
+  }
+
+  seekLocalPlaybackBy(seekSeconds);
+}
+
+function clearTransportHold() {
+  if (transportHoldTimer) {
+    window.clearTimeout(transportHoldTimer);
+    transportHoldTimer = 0;
+  }
+  if (transportHoldInterval) {
+    window.clearInterval(transportHoldInterval);
+    transportHoldInterval = 0;
+  }
+  transportHoldDirection = 0;
+  transportHoldTriggered = false;
+  transportHoldPointerId = null;
+  transportHoldButton = null;
+  syncPlaybackProgressLoop();
+}
+
+function releaseTransportHold(button, pointerId = null) {
+  if (!transportHoldButton || transportHoldButton !== button) {
+    return;
+  }
+  if (pointerId !== null && transportHoldPointerId !== null && transportHoldPointerId !== pointerId) {
+    return;
+  }
+  const shouldSuppressClick = transportHoldTriggered;
+  clearTransportHold();
+  if (shouldSuppressClick) {
+    suppressTransportClickDirection = button === rewindButton ? -1 : 1;
+    flushQueuedSpotifySeek();
+  }
+}
+
+function bindTransportHold(button, direction) {
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !isTransportScrubMode()) {
+      return;
+    }
+    clearTransportHold();
+    transportHoldDirection = direction;
+    transportHoldPointerId = event.pointerId;
+    transportHoldButton = button;
+    haptics.transport();
+    try {
+      button.setPointerCapture(event.pointerId);
+    } catch (error) {
+      // Ignore pointer capture failures.
+    }
+    transportHoldTimer = window.setTimeout(() => {
+      transportHoldTriggered = true;
+      seekCurrentPlaybackBy(direction, true);
+      transportHoldInterval = window.setInterval(() => {
+        seekCurrentPlaybackBy(direction, true);
+      }, TRANSPORT_HOLD_INTERVAL_MS);
+      syncPlaybackProgressLoop();
+    }, TRANSPORT_HOLD_DELAY_MS);
+    event.preventDefault();
+  });
+
+  ["pointerup", "pointercancel", "lostpointercapture", "pointerleave"].forEach((eventName) => {
+    button.addEventListener(eventName, (event) => {
+      releaseTransportHold(button, "pointerId" in event ? event.pointerId : null);
+    });
   });
 }
 
@@ -1891,6 +2243,9 @@ function normalizeSpotifyPlayerState(payload = {}) {
     hasActiveDevice: Boolean(payload.hasActiveDevice),
     isPlaying: Boolean(payload.isPlaying),
     progressMs: Number.isFinite(Number(payload.progressMs)) ? Number(payload.progressMs) : 0,
+    progressTimestampMs: Number.isFinite(Number(payload.progressTimestampMs))
+      ? Number(payload.progressTimestampMs)
+      : Date.now(),
     deviceName: payload.deviceName || "",
     deviceType: payload.deviceType || "",
     deviceId: payload.deviceId || "",
@@ -3516,6 +3871,7 @@ function renderPlayer() {
       playerRemaining.textContent = "-0:00";
       playerProgressFill.style.width = "0%";
       syncPlaybackButton();
+      syncPlaybackProgressLoop();
       return;
     }
 
@@ -3534,6 +3890,7 @@ function renderPlayer() {
     previewAudio.load();
     renderProgress();
     syncPlaybackButton();
+    syncPlaybackProgressLoop();
     return;
   }
 
@@ -3576,6 +3933,7 @@ function renderPlayer() {
 
   renderProgress();
   syncPlaybackButton();
+  syncPlaybackProgressLoop();
 }
 
 function formatTime(seconds) {
@@ -3590,8 +3948,8 @@ function formatTime(seconds) {
 
 function renderProgress() {
   if (isSpotifyRemoteSong()) {
-    const duration = Number(currentSong?.durationSeconds || 0);
-    const currentTime = Math.max(0, spotifyPlayerState.progressMs / 1000);
+    const duration = getCurrentTrackDurationSeconds();
+    const currentTime = Math.max(0, getDisplayedSpotifyProgressMs() / 1000);
     const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
     const remaining = duration > 0 ? Math.max(0, duration - currentTime) : 0;
 
@@ -3603,7 +3961,7 @@ function renderProgress() {
     return;
   }
 
-  const duration = Number.isFinite(previewAudio.duration) ? previewAudio.duration : 0;
+  const duration = getCurrentTrackDurationSeconds();
   const currentTime = Number.isFinite(previewAudio.currentTime) ? previewAudio.currentTime : 0;
   const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const remaining = duration > 0 ? Math.max(0, duration - currentTime) : 0;
@@ -3657,10 +4015,9 @@ async function activateLibraryItem(itemData) {
         setCurrentSong(localSong);
       }
       screenMode = "now-playing";
+      const playPromise = previewAudio.paused ? playCurrentLocalSong() : Promise.resolve();
       syncUi();
-      if (previewAudio.paused) {
-        await previewAudio.play();
-      }
+      await playPromise;
     } catch (error) {
       if (spotifyViewState.connected && (isSpotifyRemoteSong() || !currentSong)) {
         presentSpotifyPlaybackFailure(error, spotifyPlaybackContext.selectedTrack, spotifyPlaybackContext.selectedContextUri);
@@ -4104,7 +4461,16 @@ function setCurrentSong(song) {
   highlightedSongId = song ? song.id : "";
   if (!isSpotifyRemoteSong(song)) {
     previewAudio.pause();
-    previewAudio.src = song ? song.playbackUrl : "";
+    if (song?.playbackUrl) {
+      primeLocalPreviewAudio(song);
+      try {
+        previewAudio.currentTime = 0;
+      } catch (error) {
+        // Ignore seek failures until metadata is ready.
+      }
+    } else {
+      previewAudio.removeAttribute("src");
+    }
   } else {
     previewAudio.pause();
     previewAudio.removeAttribute("src");
@@ -4112,6 +4478,7 @@ function setCurrentSong(song) {
   }
   renderPlayer();
   syncPlaybackButton();
+  syncPlaybackProgressLoop();
 }
 
 function clearPendingUploads() {
@@ -4399,11 +4766,12 @@ async function initializeSpotifySdk() {
           spotifyUrl: "",
         });
         spotifyPlayerState = {
-          ...spotifyPlayerState,
+          ...normalizeSpotifyPlayerState(spotifyPlayerState),
           connected: true,
           hasActiveDevice: true,
           isPlaying: !state.paused,
           progressMs: Number(state.position || 0),
+          progressTimestampMs: Date.now(),
           deviceName: "SwagPods Web Player",
           deviceType: "Web",
           deviceId: spotifySdkDeviceId,
@@ -4413,6 +4781,7 @@ async function initializeSpotifySdk() {
         if (normalizedTrack) {
           rememberSpotifyTrackSelection(normalizedTrack, spotifyPlayerState.contextUri || "");
         }
+        syncPlaybackProgressLoop();
         if (screenMode === "now-playing") {
           void refreshSpotifyPlayerState().catch(() => {});
         }
@@ -4915,6 +5284,7 @@ function applySpotifyPlayerResponse(payload = {}, fallbackTrack = null, fallback
     deviceType: payload?.deviceType || (hasActiveDevice && spotifySdkReady ? "Web" : ""),
     deviceId: resolvedDeviceId,
     contextUri: normalizedContextUri,
+    progressTimestampMs: Date.now(),
     track: normalizedTrack,
   });
 
@@ -4933,6 +5303,7 @@ function applySpotifyPlayerResponse(payload = {}, fallbackTrack = null, fallback
   }
 
   syncUi();
+  syncPlaybackProgressLoop();
   return spotifyPlayerState;
 }
 
@@ -5421,10 +5792,11 @@ async function playSongAtIndex(index) {
 
   setCurrentSong(song);
   screenMode = "now-playing";
+  const playPromise = playCurrentLocalSong();
   syncUi();
 
   try {
-    await previewAudio.play();
+    await playPromise;
   } catch (error) {
     setMessage("The browser blocked playback. Click play again to allow audio.", "error");
   }
@@ -5796,6 +6168,15 @@ menuButton.addEventListener("click", () => {
 rewindButton.addEventListener("click", async () => {
   haptics.prime();
   haptics.transport();
+  if (isTransportScrubMode()) {
+    const suppressedDirection = suppressTransportClickDirection;
+    suppressTransportClickDirection = 0;
+    if (suppressedDirection === -1) {
+      return;
+    }
+    seekCurrentPlaybackBy(-1, false);
+    return;
+  }
   if (screenMode === "library") {
     moveLibrarySelection(-1, "button");
     return;
@@ -5855,6 +6236,15 @@ rewindButton.addEventListener("click", async () => {
 forwardButton.addEventListener("click", async () => {
   haptics.prime();
   haptics.transport();
+  if (isTransportScrubMode()) {
+    const suppressedDirection = suppressTransportClickDirection;
+    suppressTransportClickDirection = 0;
+    if (suppressedDirection === 1) {
+      return;
+    }
+    seekCurrentPlaybackBy(1, false);
+    return;
+  }
   if (screenMode === "library") {
     moveLibrarySelection(1, "button");
     return;
@@ -6091,6 +6481,8 @@ clickWheel.addEventListener("pointermove", (event) => {
 
 [menuButton, rewindButton, forwardButton, playbackButton].forEach(bindWheelSectorHighlight);
 bindCenterButtonHighlight(selectButton);
+bindTransportHold(rewindButton, -1);
+bindTransportHold(forwardButton, 1);
 
 metadataForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -6279,12 +6671,12 @@ playbackButton.addEventListener("click", async () => {
     return;
   }
   if (!previewAudio.src) {
-    previewAudio.src = currentSong.playbackUrl;
+    primeLocalPreviewAudio(currentSong);
   }
 
   if (previewAudio.paused) {
     try {
-      await previewAudio.play();
+      await playCurrentLocalSong();
     } catch (error) {
       setMessage("The browser blocked playback. Click play again to allow audio.", "error");
     }
@@ -6316,9 +6708,17 @@ window.addEventListener("keydown", (event) => {
 
 previewAudio.addEventListener("play", syncPlaybackButton);
 previewAudio.addEventListener("pause", syncPlaybackButton);
+previewAudio.addEventListener("play", syncPlaybackProgressLoop);
+previewAudio.addEventListener("pause", syncPlaybackProgressLoop);
+previewAudio.addEventListener("playing", syncPlaybackProgressLoop);
+previewAudio.addEventListener("seeking", syncPlaybackProgressLoop);
+previewAudio.addEventListener("seeked", syncPlaybackProgressLoop);
+previewAudio.addEventListener("waiting", syncPlaybackProgressLoop);
+previewAudio.addEventListener("canplay", syncPlaybackProgressLoop);
+previewAudio.addEventListener("progress", renderProgress);
 previewAudio.addEventListener("ended", () => {
   syncPlaybackButton();
-  renderProgress();
+  syncPlaybackProgressLoop();
 });
 previewAudio.addEventListener("timeupdate", renderProgress);
 previewAudio.addEventListener("loadedmetadata", renderProgress);

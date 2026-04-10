@@ -2056,6 +2056,17 @@ def spotify_player_command():
         elif action == "previous":
             target_device_id = ensure_spotify_target_device(access_token, device_id)
             spotify_api_request(access_token, "POST", "/me/player/previous", params={"device_id": target_device_id})
+        elif action == "seek":
+            target_device_id = ensure_spotify_target_device(access_token, device_id)
+            spotify_api_request(
+                access_token,
+                "PUT",
+                "/me/player/seek",
+                params={
+                    "position_ms": max(0, position_ms),
+                    "device_id": target_device_id,
+                },
+            )
         elif action == "play-track":
             if not track_uri:
                 return jsonify({"error": "Missing Spotify track URI."}), 400
